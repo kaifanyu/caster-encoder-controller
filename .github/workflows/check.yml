@@ -1,0 +1,22 @@
+name: Check
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  host-tests:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - run: ./scripts/test.sh
+
+  firmware:
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        role: [H1, H2, CENTER]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - run: cp config/example.h config/local.h
+      - run: ./scripts/idf.sh "${{ matrix.role }}" build
