@@ -2,6 +2,7 @@
 #include "encoder_math.h"
 
 #include <cmath>
+#include <cstdio>
 #include "driver/gpio.h"
 #include "driver/pulse_cnt.h"
 #include "driver/spi_master.h"
@@ -143,9 +144,19 @@ void init_quadrature() {
 }
 
 void init_absolute() {
-    // Set output latch HIGH before enabling the pad output.
+    // Manual CS is not configured by the SPI driver (spics_io_num = -1).
+    // gpio_set_direction() alone does not select the GPIO IO_MUX function;
+    // GPIO21 can remain routed to SDIO_DATA1 instead of driving encoder CS.
+    // Preload HIGH, then configure the mux and output together to avoid a
+    // spurious active-low select during initialization.
     ESP_ERROR_CHECK(gpio_set_level(kCs, 1));
-    ESP_ERROR_CHECK(gpio_set_direction(kCs, GPIO_MODE_OUTPUT));
+    gpio_config_t cs_config{};
+    cs_config.pin_bit_mask = 1ULL << kCs;
+    cs_config.mode = GPIO_MODE_OUTPUT;
+    cs_config.pull_up_en = GPIO_PULLUP_ENABLE;
+    cs_config.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    cs_config.intr_type = GPIO_INTR_DISABLE;
+    ESP_ERROR_CHECK(gpio_config(&cs_config));
     spi_bus_config_t bus{};
     bus.mosi_io_num = 18;
     bus.miso_io_num = 20;
@@ -168,6 +179,8 @@ void init_absolute() {
     device.queue_size = 1;
     ESP_ERROR_CHECK(spi_bus_add_device(SPI2_HOST, &device, &spi));
     last_cs_high_us = esp_timer_get_time();
+    ESP_LOGI(kTag, "CENTER SPI: mode=0 clock=500000Hz; manual CS GPIO21 configured as GPIO");
+    ESP_ERROR_CHECK(gpio_dump_io_configuration(stdout, 1ULL << kCs));
 }
 
 bool read_absolute_word(uint16_t& word, int64_t& timestamp) {
