@@ -66,6 +66,34 @@ struct AbsoluteStep {
     double velocity_rad_s = std::numeric_limits<double>::quiet_NaN();
 };
 
+enum class AbsoluteLossReason {
+    none,
+    unverified_rate_bound,
+    invalid_time,
+    ambiguous_gap,
+    half_turn,
+    excessive_motion,
+};
+
+inline const char* absolute_loss_reason_name(AbsoluteLossReason reason) {
+    switch (reason) {
+        case AbsoluteLossReason::none: return "none";
+        case AbsoluteLossReason::unverified_rate_bound: return "unverified_rate_bound";
+        case AbsoluteLossReason::invalid_time: return "invalid_time";
+        case AbsoluteLossReason::ambiguous_gap: return "ambiguous_gap";
+        case AbsoluteLossReason::half_turn: return "half_turn";
+        case AbsoluteLossReason::excessive_motion: return "excessive_motion";
+    }
+    return "unknown";
+}
+
+struct AbsoluteContinuityLoss {
+    AbsoluteLossReason reason = AbsoluteLossReason::none;
+    int64_t interval_us = 0;
+    // Shortest wrapped candidate, not a recovered displacement across a gap.
+    int delta_bins = 0;
+};
+
 // A verified *physical* speed bound is required to distinguish turns. Once a
 // gap/rate violation makes integration ambiguous, continuity stays lost for
 // this boot; valid single-turn phase remains usable independently.
@@ -78,16 +106,24 @@ public:
         if (!initialized_) {
             initialized_ = true;
             continuous_ = bound_ok;
+            if (!bound_ok) loss_.reason = AbsoluteLossReason::unverified_rate_bound;
             angle_ = wrap_positive(sign * (position * tau / absolute_bins - zero_rad));
         } else {
-            const double dt_s = (timestamp_us - previous_time_) / 1e6;
+            const int64_t interval_us = timestamp_us - previous_time_;
+            const double dt_s = interval_us / 1e6;
             const double allowed_bins = max_rpm / 60.0 * absolute_bins * dt_s;
             int delta = 0;
+            const bool delta_ok = absolute_delta(position, previous_position_, delta);
             // Two bins cover quantization near the limit; include that margin
             // in the half-turn test so a near-half-turn jump stays ambiguous.
-            const bool safe = bound_ok && dt_s > 0 && allowed_bins + 2 < 8192 &&
-                              absolute_delta(position, previous_position_, delta) &&
-                              std::abs(delta) <= allowed_bins + 2;
+            AbsoluteLossReason reason = AbsoluteLossReason::none;
+            if (!bound_ok) reason = AbsoluteLossReason::unverified_rate_bound;
+            else if (interval_us <= 0) reason = AbsoluteLossReason::invalid_time;
+            else if (!(allowed_bins + 2 < 8192)) reason = AbsoluteLossReason::ambiguous_gap;
+            else if (!delta_ok) reason = AbsoluteLossReason::half_turn;
+            else if (!(std::abs(delta) <= allowed_bins + 2)) reason = AbsoluteLossReason::excessive_motion;
+            const bool safe = reason == AbsoluteLossReason::none;
+            if (continuous_ && !safe) loss_ = {reason, interval_us, delta};
             continuous_ = continuous_ && safe;
             if (safe) {
                 result.velocity_valid = true;
@@ -102,12 +138,15 @@ public:
         return result;
     }
 
+    const AbsoluteContinuityLoss& continuity_loss() const { return loss_; }
+
 private:
     bool initialized_ = false;
     bool continuous_ = false;
     int previous_position_ = 0;
     int64_t previous_time_ = 0;
     double angle_ = 0;
+    AbsoluteContinuityLoss loss_{};
 };
 
 }  // namespace caster::math

@@ -50,12 +50,23 @@ void transmit(void*) {
     int64_t last_metadata = -2000000;
     int64_t last_debug = 0;
     int64_t last_reconnect = 0;
+    bool center_loss_reported = false;
     const auto config = caster::configuration();
     while (true) {
         vTaskDelayUntil(&wake, pdMS_TO_TICKS(1000 / TRANSMIT_HZ));
         caster::Sample batch[2];
         int count = 0;
         while (count < 2 && xQueueReceive(samples_queue, &batch[count], 0) == pdTRUE) ++count;
+        for (int i = 0; i < count && !center_loss_reported; ++i) {
+            const auto& loss = batch[i].reading.continuity_loss;
+            if (CASTER_NODE_ID == 3 && loss.reason != caster::math::AbsoluteLossReason::none) {
+                ESP_LOGW(TAG, "CENTER unwrapped angle unavailable: reason=%s gap_us=%" PRId64
+                         " wrapped_delta_bins=%d max_rpm=%.3f; first loss retained until reboot",
+                         caster::math::absolute_loss_reason_name(loss.reason),
+                         loss.interval_us, loss.delta_bins, config.max_rpm);
+                center_loss_reported = true;
+            }
+        }
         if (count) {
             char* data = caster::serialize_samples(boot_id, batch, count, diagnostics);
             if (!caster::transport_send(data)) diagnostics.radio_failures.fetch_add(1);
@@ -80,9 +91,19 @@ void transmit(void*) {
                      diagnostics.invalid_spi_responses.load(), diagnostics.radio_failures.load());
             if (count) {
                 const auto& r = batch[count - 1].reading;
-                ESP_LOGI(TAG, "seq=%" PRIu64 " count=%" PRId64 " spi=0x%04x pos=%d angle=%.6f velocity=%.6f flags=0x%04" PRIx32,
-                         batch[count - 1].sequence, r.raw_count, r.raw_spi_word, r.position14,
-                         r.angle_rad, r.velocity_rad_s, r.flags);
+                if (CASTER_NODE_ID == 3) {
+                    ESP_LOGI(TAG, "seq=%" PRIu64 " spi=0x%04x pos=%d absolute_rad=%.6f"
+                             " alpha_rad=%.6f alpha_deg=%.3f unwrapped_angle_rad=%.6f"
+                             " velocity_rad_s=%.6f flags=0x%04" PRIx32,
+                             batch[count - 1].sequence, r.raw_spi_word, r.position14,
+                             r.absolute_angle_rad, r.calibrated_alpha_rad,
+                             r.calibrated_alpha_rad * 360.0 / caster::math::tau,
+                             r.angle_rad, r.velocity_rad_s, r.flags);
+                } else {
+                    ESP_LOGI(TAG, "seq=%" PRIu64 " count=%" PRId64 " spi=0x%04x pos=%d angle=%.6f velocity=%.6f flags=0x%04" PRIx32,
+                             batch[count - 1].sequence, r.raw_count, r.raw_spi_word, r.position14,
+                             r.angle_rad, r.velocity_rad_s, r.flags);
+                }
             }
             last_debug = now;
         }
@@ -110,8 +131,20 @@ extern "C" void app_main() {
     if (CASTER_NODE_ID != 3)
         ESP_LOGI(TAG, "PPR=%d x4=%d verified=%s sign=%d", config.ppr, config.ppr * 4,
                  config.ppr_verified ? "yes" : "NO", config.sign);
+    else
+        ESP_LOGI(TAG, "CENTER max_rpm=%.3f verified=%s sign=%d zero_rad=%.6f; alpha is single-turn",
+                 config.max_rpm, config.max_rpm_verified ? "yes" : "NO",
+                 config.sign, config.alpha_zero_rad);
     ESP_LOGI(TAG, "Hold mechanism stationary at power-on; waiting 250 ms. USB not required.");
     vTaskDelay(pdMS_TO_TICKS(250));
+    // Complete network setup before the first encoder sample. Startup work
+    // must not create an ambiguous gap in an already running CENTER tracker.
+    // transport_init() starts Wi-Fi without waiting for a connection.
+    caster::transport_init();
+    // Generate the session identifier with the RF entropy source active.
+    snprintf(boot_id, sizeof(boot_id), "%08" PRIx32 "%08" PRIx32, esp_random(), esp_random());
+    ESP_LOGI(TAG, "boot_id=%s UDP receiver=%s:%d sample=%dHz transmit=%dHz clock_sync=INVALID",
+             boot_id, RECEIVER_IPV4, UDP_PORT, SAMPLE_HZ, TRANSMIT_HZ);
     caster::encoder_init(config);
     samples_queue = xQueueCreate(64, sizeof(caster::Sample));
     ESP_ERROR_CHECK(samples_queue ? ESP_OK : ESP_ERR_NO_MEM);
@@ -123,10 +156,5 @@ extern "C" void app_main() {
     // Task-dispatched callbacks are short; acquisition runs in its own task.
     ESP_ERROR_CHECK(esp_timer_create(&args, &timer));
     ESP_ERROR_CHECK(esp_timer_start_periodic(timer, 1000000 / SAMPLE_HZ));
-    caster::transport_init();
-    // Generate the session identifier with the RF entropy source active.
-    snprintf(boot_id, sizeof(boot_id), "%08" PRIx32 "%08" PRIx32, esp_random(), esp_random());
-    ESP_LOGI(TAG, "boot_id=%s UDP receiver=%s:%d sample=%dHz transmit=%dHz clock_sync=INVALID",
-             boot_id, RECEIVER_IPV4, UDP_PORT, SAMPLE_HZ, TRANSMIT_HZ);
     ESP_ERROR_CHECK(xTaskCreate(transmit, "telemetry", 8192, nullptr, 4, nullptr) == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
 }

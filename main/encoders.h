@@ -1,5 +1,7 @@
 #pragma once
 
+#include "encoder_math.h"
+
 #include <cstdint>
 #include <limits>
 
@@ -53,6 +55,8 @@ struct Reading {
     uint32_t flags = 0;
     uint32_t invalid_spi_responses = 0;
     uint32_t index_queue_drops = 0;
+    // Internal serial diagnostics only; does not change the UDP schema.
+    math::AbsoluteContinuityLoss continuity_loss{};
 };
 
 // Initialize once, after the >=250 ms stationary startup interval.

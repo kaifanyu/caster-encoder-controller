@@ -274,6 +274,7 @@ Reading encoder_read() {
             (result.absolute_angle_rad - config.alpha_zero_rad));
         const auto step = absolute_tracker.update(result.position14, result.timestamp_us,
             config.max_rpm, config.max_rpm_verified, config.sign, config.alpha_zero_rad);
+        result.continuity_loss = absolute_tracker.continuity_loss();
         if (step.continuous) result.flags |= UNWRAP_CONTINUOUS;
         else result.flags |= CONTINUITY_LOST;
         result.angle_rad = step.angle_rad;

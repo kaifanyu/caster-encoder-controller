@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdint>
 #include <iostream>
+#include <limits>
 
 using namespace caster::math;
 
@@ -114,6 +115,105 @@ void ambiguity_checks() {
     step = duplicate_time.update(0, 1000, 600, true, 1, 0);
     assert(!step.continuous && !step.velocity_valid);
 }
+
+void expect_loss(const AbsoluteTracker& tracker, AbsoluteLossReason reason,
+                 int64_t interval_us, int delta_bins) {
+    const auto& loss = tracker.continuity_loss();
+    assert(loss.reason == reason);
+    assert(loss.interval_us == interval_us);
+    assert(loss.delta_bins == delta_bins);
+}
+
+void expect_invalid_step(const AbsoluteStep& step) {
+    assert(!step.continuous && !step.velocity_valid);
+    assert(std::isnan(step.angle_rad) && std::isnan(step.velocity_rad_s));
+}
+
+void expect_velocity_recovery(AbsoluteTracker& tracker, int position,
+                              int64_t timestamp_us) {
+    // Copy the record so later updates cannot hide an accidental overwrite.
+    const auto first_loss = tracker.continuity_loss();
+    const int next = (position + 1) % absolute_bins;
+    auto step = tracker.update(next, timestamp_us + 5000, 600, true, 1, 0);
+    assert(!step.continuous && step.velocity_valid && std::isnan(step.angle_rad));
+    assert(close(step.velocity_rad_s, tau / absolute_bins / .005));
+    expect_loss(tracker, first_loss.reason, first_loss.interval_us, first_loss.delta_bins);
+
+    // A different failure must not replace the explanation for first loss.
+    step = tracker.update(next, timestamp_us + 4000, 600, true, 1, 0);
+    expect_invalid_step(step);
+    expect_loss(tracker, first_loss.reason, first_loss.interval_us, first_loss.delta_bins);
+}
+
+void continuity_diagnostic_checks() {
+    AbsoluteTracker healthy;
+    expect_loss(healthy, AbsoluteLossReason::none, 0, 0);
+    auto step = healthy.update(100, 1000, 600, true, 1, 0);
+    assert(step.continuous && !step.velocity_valid && std::isfinite(step.angle_rad));
+    expect_loss(healthy, AbsoluteLossReason::none, 0, 0);
+    step = healthy.update(101, 6000, 600, true, 1, 0);
+    assert(step.continuous && step.velocity_valid);
+    expect_loss(healthy, AbsoluteLossReason::none, 0, 0);
+
+    AbsoluteTracker unverified;
+    expect_invalid_step(unverified.update(100, 1000, 600, false, 1, 0));
+    expect_loss(unverified, AbsoluteLossReason::unverified_rate_bound, 0, 0);
+    expect_velocity_recovery(unverified, 100, 1000);
+
+    for (const double max_rpm : {0.0, -600.0,
+                                std::numeric_limits<double>::infinity(),
+                                std::numeric_limits<double>::quiet_NaN()}) {
+        AbsoluteTracker invalid_bound;
+        expect_invalid_step(invalid_bound.update(100, 1000, max_rpm, true, 1, 0));
+        expect_loss(invalid_bound, AbsoluteLossReason::unverified_rate_bound, 0, 0);
+        expect_velocity_recovery(invalid_bound, 100, 1000);
+    }
+
+    AbsoluteTracker revoked_bound;
+    revoked_bound.update(16383, 1000, 600, true, 1, 0);
+    expect_invalid_step(revoked_bound.update(0, 6000, 600, false, 1, 0));
+    expect_loss(revoked_bound, AbsoluteLossReason::unverified_rate_bound, 5000, 1);
+    expect_velocity_recovery(revoked_bound, 0, 6000);
+
+    for (const int64_t interval_us : {int64_t{0}, int64_t{-5000}}) {
+        AbsoluteTracker invalid_time;
+        invalid_time.update(16383, 6000, 600, true, 1, 0);
+        expect_invalid_step(invalid_time.update(0, 6000 + interval_us, 600, true, 1, 0));
+        expect_loss(invalid_time, AbsoluteLossReason::invalid_time, interval_us, 1);
+        expect_velocity_recovery(invalid_time, 0, 6000 + interval_us);
+    }
+
+    AbsoluteTracker gap;
+    gap.update(16380, 1000, 600, true, 1, 0);
+    expect_invalid_step(gap.update(4, 51000, 600, true, 1, 0));
+    expect_loss(gap, AbsoluteLossReason::ambiguous_gap, 50000, 8);
+    expect_velocity_recovery(gap, 4, 51000);
+
+    // The quantization margin also makes intervals just below 50 ms ambiguous.
+    AbsoluteTracker gap_margin;
+    gap_margin.update(0, 1000, 600, true, 1, 0);
+    expect_invalid_step(gap_margin.update(1, 50988, 600, true, 1, 0));
+    expect_loss(gap_margin, AbsoluteLossReason::ambiguous_gap, 49988, 1);
+    expect_velocity_recovery(gap_margin, 1, 50988);
+
+    for (const int position : {0, 8192}) {
+        AbsoluteTracker half_turn;
+        half_turn.update(8192 - position, 1000, 600, true, 1, 0);
+        expect_invalid_step(half_turn.update(position, 6000, 600, true, 1, 0));
+        expect_loss(half_turn, AbsoluteLossReason::half_turn, 5000, 2 * position - 8192);
+        expect_velocity_recovery(half_turn, position, 6000);
+    }
+
+    for (const int position : {1000, 15384}) {
+        AbsoluteTracker excessive_motion;
+        const int previous = position == 1000 ? 16380 : 4;
+        excessive_motion.update(previous, 1000, 60, true, 1, 0);
+        expect_invalid_step(excessive_motion.update(position, 6000, 60, true, 1, 0));
+        expect_loss(excessive_motion, AbsoluteLossReason::excessive_motion,
+                    5000, position == 1000 ? 1004 : -1004);
+        expect_velocity_recovery(excessive_motion, position, 6000);
+    }
+}
 }  // namespace
 
 int main() {
@@ -121,6 +221,7 @@ int main() {
     count_rollover_checks();
     absolute_wrap_checks();
     ambiguity_checks();
+    continuity_diagnostic_checks();
     assert(close(wrap_positive(-.25), tau - .25));
     assert(close(low_pass(0, 10, .1, .1), 10 * (1 - std::exp(-1))));
     assert(low_pass(0, 10, .1, 0) == 10);

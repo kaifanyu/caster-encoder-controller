@@ -13,8 +13,10 @@ Usage: ./scripts/idf.sh H1|H2|CENTER [idf.py arguments]
   ./scripts/idf.sh H1 build
   ./scripts/idf.sh H1 -p /dev/ttyACM0 flash monitor
   ./scripts/idf.sh CENTER size
+  python3 scripts/flash_windows.py CENTER --port COM6  # Windows USB from WSL
 
-Uses ESP-IDF v5.4.2 from your activated environment, or its Docker image.
+Uses ESP-IDF v5.4.2 from your activated environment, a local installation at
+~/esp/esp-idf-v5.4.2 (override with CASTER_IDF_PATH), or its Docker image.
 Copy config/example.h to config/local.h and edit it before building.
 Disconnect the battery/UBEC before connecting USB.
 EOF
@@ -33,6 +35,30 @@ esac
 if [[ $# -eq 0 ]]; then
     set -- build
 fi
+
+print_flash_hint() {
+    local argument build_requested=false windows_port=""
+    for argument in "$@"; do
+        if [[ "$argument" == build || "$argument" == all ]]; then
+            build_requested=true
+        fi
+    done
+    if [[ "$build_requested" != true ]]; then return 0; fi
+    if [[ -n "${WSL_DISTRO_NAME:-}" ]] && command -v powershell.exe >/dev/null 2>&1; then
+        windows_port=$(powershell.exe -NoProfile -NonInteractive -Command \
+            '$ports = @(Get-CimInstance Win32_SerialPort | Where-Object { $_.PNPDeviceID -like "*VID_303A&PID_1001*" }); if ($ports.Count -eq 1) { $ports[0].DeviceID }' \
+            2>/dev/null | tr -d '\r\n') || windows_port=""
+        if [[ "$windows_port" =~ ^COM[1-9][0-9]*$ ]]; then
+            printf '\nESP32 detected on Windows %s. Flash from this directory with:\n  python3 scripts/flash_windows.py %s --port %s\n' \
+                "$windows_port" "$role" "$windows_port"
+        else
+            printf '\nFor Windows USB from WSL, use scripts/flash_windows.py with the board\047s Windows COM port; see README.md.\n'
+        fi
+    else
+        printf '\nUse ./scripts/idf.sh %s -p YOUR_SERIAL_PORT flash monitor to activate the SDK automatically.\n' "$role"
+    fi
+}
+
 if [[ ! -f "$repo_dir/config/local.h" ]]; then
     printf 'First copy config/example.h to config/local.h and edit your settings.\n' >&2
     exit 2
@@ -40,10 +66,21 @@ fi
 
 mkdir -p "$repo_dir/build/$role"
 cd "$repo_dir"
+native_sdk=${CASTER_IDF_PATH:-$HOME/esp/esp-idf-v${sdk_version}}
+active_sdk_version=""
+if command -v idf.py >/dev/null 2>&1; then
+    active_sdk_version=$(idf.py --version 2>/dev/null || true)
+fi
+if [[ "$active_sdk_version" != "ESP-IDF v${sdk_version}" && -f "$native_sdk/export.sh" ]]; then
+    # Activate only for this command, leaving the user's ROS/Python shell intact.
+    . "$native_sdk/export.sh" >/dev/null
+fi
 if command -v idf.py >/dev/null 2>&1 && [[ $(idf.py --version 2>/dev/null) == "ESP-IDF v${sdk_version}" ]]; then
-    exec idf.py -B "build/$role" \
+    idf.py -B "build/$role" \
         "-DSDKCONFIG=$repo_dir/build/$role/sdkconfig" \
         "-DCASTER_ROLE=$role" -DIDF_TARGET=esp32c6 "$@"
+    print_flash_hint "$@"
+    exit 0
 fi
 
 if ! command -v docker >/dev/null 2>&1; then
@@ -80,6 +117,7 @@ if [[ -n "$port" ]]; then
     fi
     docker_args+=(--device "$port:$port" --group-add "$(stat -c %g "$port")")
 fi
-exec docker "${docker_args[@]}" "$container_image" \
+docker "${docker_args[@]}" "$container_image" \
     idf.py -B "build/$role" "-DSDKCONFIG=/project/build/$role/sdkconfig" \
     "-DCASTER_ROLE=$role" -DIDF_TARGET=esp32c6 "$@"
+print_flash_hint "$@"

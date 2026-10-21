@@ -43,8 +43,12 @@ Hold the mechanism still during power-on. Firmware waits at least 250 ms before 
 
 The firmware uses **ESP-IDF v5.4.2**, target `esp32c6`. There are no third-party firmware libraries. The build helper uses an activated installation of that exact SDK, or the Espressif Docker image pinned by version and digest in `scripts/idf.sh`. The first Docker build downloads the SDK/toolchain image.
 
+The helper also activates a native SDK installed at `~/esp/esp-idf-v5.4.2`
+automatically for each command. Set `CASTER_IDF_PATH` to use another native
+installation directory. This does not activate ESP-IDF in your parent shell.
+
 ```bash
-cd /home/para/encoder-controller
+cd ~/caster-encoder-controller
 cp config/example.h config/local.h
 ```
 
@@ -79,6 +83,45 @@ Repeat with `H2` and `CENTER`. Substitute your actual device path. Exit the seri
 
 The startup log identifies the role, GPIOs, firmware version, reset reason, and PPR assumption. USB is only for stationary programming/debugging. After disconnecting USB, reconnect that node's normal power and keep it still while starting.
 
+### CENTER bench check over USB
+
+With the encoder powered using your verified bench arrangement, the serial
+monitor works without a Wi-Fi connection. CENTER logs `absolute_rad` (raw
+single-turn angle), `alpha_rad` and `alpha_deg` (single-turn angle with software
+zero/direction applied), `unwrapped_angle_rad` (accumulated turns), and
+`velocity_rad_s`. The UDP protocol fields keep their existing names.
+
+Keep the shaft still after reset, then turn slowly through one full revolution
+and back. `alpha_deg` should traverse 0–360 degrees, wrap once per turn, and
+return close to its starting value. Check that velocity changes sign when you
+reverse direction and that `spi_invalid` stays zero. The software zero is not a
+verified physical reference until you calibrate it.
+
+If `unwrapped_angle_rad` becomes `nan`, a one-time warning reports the first
+continuity-loss reason, the interval between valid samples in microseconds,
+and the shortest wrapped candidate displacement in encoder bins. The wrapped
+candidate cannot recover missed turns. Valid single-turn `alpha` remains usable;
+unwrapped continuity stays lost until reset. An unverified speed bound also
+leaves velocity unavailable. Retain the startup and warning lines when debugging.
+Disconnected Wi-Fi and increasing `radio_failures` are expected in this USB check.
+
+When building in WSL with the board attached to Windows, use
+`python3 scripts/flash_windows.py CENTER --port COM6` (substitute its Windows COM
+port). This builds with `scripts/idf.sh` and uses Windows PlatformIO's Python and
+esptool to flash the images listed in `build/CENTER/flasher_args.json`. Add
+`--dry-run` to validate an existing build and print the command without building,
+resetting, or accessing the serial port; add `--skip-build` to flash an existing
+build. Custom Windows installations can supply `--windows-python` and
+`--esptool-path`. Review `config/local.h` before flashing; the helper does not
+perform a full-chip erase.
+
+`scripts/idf.sh` activates ESP-IDF only inside its own process. The generic
+`idf.py flash` and `python -m esptool` commands printed by ESP-IDF therefore do
+not activate the SDK in your terminal or connect WSL to a Windows COM port.
+Use the Windows helper above for this setup. After a successful build, the build
+helper prints its command with the detected port when a single Espressif USB
+serial device is connected.
+
 ## 4. Record measurements
 
 Use Python 3.8 or newer on the receiver computer; the logger needs no pip packages:
@@ -86,6 +129,40 @@ Use Python 3.8 or newer on the receiver computer; the logger needs no pip packag
 ```bash
 python3 host/logger.py --output recordings
 ```
+
+For a Windows computer running WSL, start
+`python3 scripts/log_windows.py --duration 60` from WSL to receive directly in
+Windows and save under `recordings/wifi/`. Set firmware `RECEIVER_IPV4` to the
+computer's **Windows LAN IPv4 address** on the ESP32's Wi-Fi network; the WSL
+address is not the receiver address for this helper. Allow Python to receive
+incoming **UDP 5005** on the appropriate Windows Firewall network when prompted.
+For the Windows hotspot at `192.168.137.1`, an Administrator PowerShell window
+can run `scripts/allow_hotspot_udp.ps1`. It permits only this Windows Python
+executable to receive UDP 5005 at that address from `192.168.137.0/24`; address,
+subnet, and port are script parameters if the hotspot configuration changes.
+`--port`, `--output`, and `--duration` override the defaults; omit `--duration`
+to record until Ctrl+C. `--dry-run` prints the command without opening a socket
+or creating recordings. Connect the ESP32 to 2.4 GHz Wi-Fi and keep Windows
+reachable on the same LAN without client isolation.
+
+To record ROS topics on this WSL laptop instead of a standalone CSV run, use
+`python3 scripts/record_rosbag.py --duration 60`. The helper uses the sibling
+`hamr_control` checkout's existing bridge, bag recorder, topic filter, and QoS
+settings, with the Windows UDP relay in front. It prints a new bag directory
+under `recordings/rosbags/` and selects MCAP when installed, otherwise SQLite.
+Stop the standalone Windows logger first because the relay needs the same
+Windows UDP port. The ROS packet topic retains the ESP acquisition timestamps;
+its source IP and receipt time describe the Windows relay hop into WSL.
+
+For CENTER velocity checks, pass a completed run's `samples.csv` to
+`python3 host/center_velocity.py`. It writes `center_velocity.csv` beside the
+recording, using wrapped `position14` differences and ESP acquisition timestamps
+instead of Wi-Fi arrival times. These are bench estimates with a provisional
+direction sign; no mechanical zero is needed. Reboots, invalid reads, duplicate
+or reordered samples, exact half-turn changes, and gaps above 25 ms are handled
+explicitly. Each estimate still assumes less than half a turn between accepted
+samples; the gap guard does not establish a physical speed bound. Firmware
+validity flags and the original recording are preserved.
 
 Start the nodes and move each encoder slowly to confirm the corresponding node is reporting. Stop recording with **Ctrl+C**, or add `--duration 60` to record for one minute. Each run creates a new `recordings/run-.../` directory:
 
