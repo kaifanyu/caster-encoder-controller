@@ -23,8 +23,20 @@ def linux_path(path):
     return Path(capture("wslpath", "-u", path))
 
 
-def main():
+def validate_profile(build, wheel, role):
+    """Refuse artifacts configured for a different physical board."""
+    cache = {}
+    for line in (build / "CMakeCache.txt").read_text().splitlines():
+        if line.startswith(("CASTER_WHEEL:", "CASTER_ROLE:")):
+            key, value = line.split("=", 1)
+            cache[key.split(":", 1)[0]] = value
+    if cache.get("CASTER_WHEEL") != wheel or cache.get("CASTER_ROLE") != role:
+        raise ValueError(f"build profile does not match {wheel}/{role}; rebuild this profile")
+
+
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("wheel", choices=("front_left", "front_right"))
     parser.add_argument("role", choices=("H1", "H2", "CENTER"))
     parser.add_argument("--port", required=True, help="Windows serial port, e.g. COM6")
     parser.add_argument("--dry-run", action="store_true",
@@ -33,17 +45,18 @@ def main():
                         help="flash existing artifacts without rebuilding")
     parser.add_argument("--windows-python", help="Windows Python executable path")
     parser.add_argument("--esptool-path", help="Windows esptool.py path")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     if not re.fullmatch(r"COM[1-9][0-9]*", args.port, re.IGNORECASE):
         parser.error("--port must be a Windows COM port, e.g. COM6")
 
     repo = Path(__file__).resolve().parent.parent
     if not args.dry_run and not args.skip_build:
-        subprocess.run([str(repo / "scripts/idf.sh"), args.role, "build"], check=True)
-    build = repo / "build" / args.role
+        subprocess.run([str(repo / "scripts/idf.sh"), args.wheel, args.role, "build"], check=True)
+    build = repo / "build" / args.wheel / args.role
     manifest_path = build / "flasher_args.json"
     if not manifest_path.is_file():
-        parser.error(f"missing {manifest_path}; run ./scripts/idf.sh {args.role} build first")
+        parser.error(f"missing {manifest_path}; run ./scripts/idf.sh {args.wheel} {args.role} build first")
+    validate_profile(build, args.wheel, args.role)
     manifest = json.loads(manifest_path.read_text())
     extra = manifest["extra_esptool_args"]
     if extra["chip"] != "esp32c6":

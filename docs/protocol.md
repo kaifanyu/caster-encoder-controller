@@ -1,28 +1,32 @@
 # Telemetry and recordings
 
-Each node joins the configured 2.4 GHz Wi-Fi network and sends one JSON object per UDP datagram to the host (default port **5005**). This needs no fourth ESP32. Wi-Fi sleep is disabled during acquisition. UDP delivery is best effort: a successful send does not prove host receipt. Acquisition runs separately from transmission.
+Each node joins the configured 2.4 GHz Wi-Fi network and sends one JSON object per UDP datagram to the host (default port **5005** for front-left and **5006** for front-right). This needs no additional receiver ESP32. Wi-Fi sleep is disabled during acquisition. UDP delivery is best effort: a successful send does not prove host receipt. Acquisition runs separately from transmission.
 
 Run from the repository root with Python 3.8 or newer; no pip packages are needed:
 
 ```bash
-python3 host/logger.py --output recordings
-python3 host/logger.py --output recordings --bind 0.0.0.0 --port 5005 --duration 60
+python3 host/logger.py --wheel front_left --port 5005 --output recordings/front_left
+python3 host/logger.py --wheel front_right --port 5006 --output recordings/front_right
 python3 -m unittest discover -s tests -p 'test_*.py'
 ```
 
-The host must be reachable at the IP configured in the firmware, with UDP 5005 allowed by its firewall. A guest network with device isolation can prevent delivery. Stop with Ctrl+C. Every invocation creates a new `recordings/run-<UTC timestamp>-<unique suffix>/` directory, containing:
+Run the two logger commands in separate terminals, or use the Pi ROS bridges and rosbag recorder. Only one receiver can bind a UDP port at a time. The host must be reachable at the IP configured in the firmware, with UDP 5005 and 5006 allowed by its firewall. A guest network with device isolation can prevent delivery. Stop with Ctrl+C. Every invocation creates a new `recordings/run-<UTC timestamp>-<unique suffix>/` directory, containing:
 
 - `packets.jsonl`: all validated sample and metadata packets, preserving received values, with `receive_epoch_ns`, `receive_monotonic_ns`, `source_ip`, `source_port`, and the nested `packet` object.
 - `samples.csv`: one row per received sample, including duplicates, original acquisition timestamp, all raw/derived values, individual flag columns, sequence status, and packet diagnostics. JSON null becomes an empty CSV cell. Load count/timestamp columns as integers or strings; spreadsheet floating-point conversion can lose precision.
 - `metadata.jsonl`: metadata packets in the same envelope as `packets.jsonl`.
-- `stats.json`: receive totals and separate sequence accounting for each `(node_id, boot_id)`, replaced once per second and at clean exit. `invalid_packets` counts rejected datagrams.
+- `stats.json`: receive totals and separate sequence accounting for each `(wheel_id, device_id, node_id, boot_id)`, replaced once per second and at clean exit. `invalid_packets` counts malformed or conflicting datagrams; `identity_conflicts` identifies assignment conflicts and `filtered_packets` counts traffic excluded by `--wheel`.
 - `clock-map.json`: the supplied clock map, if one was requested.
 
 Files flush once per second and on clean exit. This is host storage, not persistent storage on the controllers; a finite node queue cannot preserve an unlimited radio outage. Keep the host logger running for the recording.
 
-## Version 1 packets
+## Version 2 identity and legacy version 1
 
-All packets require integer `v: 1`, `node_id` 1 (H1), 2 (H2), or 3 (CENTER), and a 16-character hexadecimal `boot_id`. A new boot gets a new ID. JSON numbers must be finite; duplicate keys and nesting beyond 16 levels are rejected. Fields below are required unless specifically described as optional. Additional fields are retained in JSONL, allowing metadata to carry the full firmware configuration.
+Current firmware sends integer `v: 2` and **both** `wheel_id` (`front_left` or `front_right`) and `device_id` (the Wi-Fi STA MAC as lowercase colon-separated hexadecimal, e.g. `aa:bb:cc:dd:ee:ff`) in every sample and metadata datagram. Wheel and role come from the selected build profile; device ID comes from the physical ESP32. Neither source IP nor boot ID substitutes for the stable wheel/device identity.
+
+The receiver still decodes legacy `v: 1` packets with no wheel/device fields. Those streams are represented in CSV and stats with `wheel_id: legacy` and `device_id: ""`; they cannot pass a `--wheel` filter. A v1 packet claiming v2 identity fields is rejected. Upgrade all six controllers for two-wheel acquisition.
+
+Both protocol versions require `node_id` 1 (H1), 2 (H2), or 3 (CENTER), and a 16-character hexadecimal `boot_id`. A new boot gets a new ID, while wheel, role, and device remain stable. JSON numbers must be finite; duplicate keys and nesting beyond 16 levels are rejected. Fields below are required unless specifically described as optional. Additional fields are retained in JSONL, allowing metadata to carry the full firmware configuration.
 
 A `type: "samples"` packet contains `samples` (1–32 records; normally two) and `diagnostics`. Every sample has:
 
@@ -63,11 +67,11 @@ Signed counts are strings on the wire so JSON tools do not silently truncate val
 | 11 | `acquisition_overrun` | Acquisition deadline was missed |
 | 12 | `spi_io_error` | SPI transfer failed |
 
-A `type: "metadata"` packet is sent periodically (about every two seconds). It requires `role` matching the node ID, nonempty `firmware_version` and `idf_version` strings, and includes the firmware's configuration fields such as PPR, sign, offsets, rates, and verification settings. The logger retains all those fields without a fixed configuration-column schema. Start logging before the run and confirm metadata from all three nodes is present.
+A `type: "metadata"` packet is sent periodically (about every two seconds). It requires `role` matching the node ID, nonempty `firmware_version` and `idf_version` strings, and includes the firmware's configuration fields such as PPR, sign, offsets, rates, and verification settings. Metadata also records `receiver_ipv4`, `udp_port`, `configured_ipv4` (empty means DHCP), `network_gateway`, and `network_netmask`; gateway/netmask are the configured static values, not a report of any DHCP lease. Wi-Fi credentials are omitted. The logger retains all those fields without a fixed configuration-column schema. Start logging before the run and confirm metadata from all six nodes is present.
 
 ## Loss and ordering
 
-Sequences are tracked independently for every node and boot. `missing_samples` is the number of unobserved sequence numbers from 0 through the highest sequence received. Late arrival recovers a gap and reduces this count; `recovered_samples` and `reordered_samples` count those late unique samples. A previously received sequence increments `duplicate_samples`. CSV `sequence_status` is `in_order`, `recovered`, or `duplicate`; rows remain in arrival order.
+Sequences are tracked independently for every wheel, physical device, role, and boot, even if both wheels share a role and boot ID. The standalone receiver rejects a second device claiming a wheel/role already observed in that run, and a device changing wheel/role in the same run. Source IP changes are allowed; use the Pi device inventory to validate intended assignments from the first packet. `missing_samples` is the number of unobserved sequence numbers from 0 through the highest sequence received. Late arrival recovers a gap and reduces this count; `recovered_samples` and `reordered_samples` count those late unique samples. A previously received sequence increments `duplicate_samples`. CSV `sequence_status` is `in_order`, `recovered`, or `duplicate`; rows remain in arrival order.
 
 Missing samples include acquisition-to-queue loss, network loss, and samples sent before logging began. They are not a measurement of radio loss alone. Final lost packets cannot be counted until a later sequence arrives. Compare firmware diagnostic counters to distinguish causes. Reboots create a separate stream; never integrate through a reboot as though it were uninterrupted motion.
 
@@ -82,6 +86,8 @@ The logger offers an optional interface for an independently calibrated offset/d
   "version": 1,
   "mappings": [
     {
+      "wheel_id": "front_left",
+      "device_id": "aa:bb:cc:dd:ee:01",
       "node_id": 1,
       "boot_id": "0123456789abcdef",
       "calibrated": false,
@@ -94,7 +100,7 @@ The logger offers an optional interface for an independently calibrated offset/d
 }
 ```
 
-This is a format example, not usable calibration. Set `calibrated: true` only after independently estimating and checking the fit. Supply one mapping per node/boot. The optional validity bounds default to all nonnegative signed 64-bit local times. Recalibrate after a reboot. The slope may be a decimal string or JSON number; `offset_ns` must be a JSON integer.
+This is a format example, not usable calibration. Set `calibrated: true` only after independently estimating and checking the fit. Supply one mapping per wheel/device/node/boot. The clock-map document format stays `version: 1`; entries for current firmware must include both `wheel_id` and `device_id`. Entries omitting both apply only to legacy v1 streams; v2 streams never fall back to a legacy mapping. The optional validity bounds default to all nonnegative signed 64-bit local times. Recalibrate after a reboot. The slope may be a decimal string or JSON number; `offset_ns` must be a JSON integer.
 
 ```bash
 python3 host/logger.py --output recordings --clock-map measured-clock-map.json

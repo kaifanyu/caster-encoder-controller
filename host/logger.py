@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Receive version-1 encoder UDP telemetry using only Python's standard library."""
+"""Receive wheel/device identified encoder UDP telemetry (v2 and legacy v1) using only Python's standard library."""
 
 import argparse
 import csv
@@ -17,6 +17,8 @@ import time
 MAX_DATAGRAM = 65507
 INT64_MAX = (1 << 63) - 1
 UINT64_MAX = (1 << 64) - 1
+WHEELS = ("front_left", "front_right")
+DEVICE_ID = re.compile(r"(?:[0-9a-f]{2}:){5}[0-9a-f]{2}\Z")
 BOOT_ID = re.compile(r"[0-9a-fA-F]{16}\Z")
 INTEGER_TEXT = re.compile(r"-?(0|[1-9][0-9]*)\Z")
 SAMPLE_FIELDS = (
@@ -36,7 +38,7 @@ FLAG_NAMES = (
 )
 CSV_FIELDS = (
     "receive_epoch_ns", "receive_monotonic_ns", "source_ip", "source_port",
-    "node_id", "boot_id", *SAMPLE_FIELDS, *FLAG_NAMES,
+    "wheel_id", "device_id", "node_id", "boot_id", *SAMPLE_FIELDS, *FLAG_NAMES,
     "sequence_status", "mapped_epoch_ns", "mapped_clock_sync_valid",
     *DIAGNOSTIC_FIELDS,
 )
@@ -85,6 +87,23 @@ def parse_json(data):
     return result
 
 
+def wheel_identity(packet, required=False):
+    has_identity = "wheel_id" in packet or "device_id" in packet
+    if required or has_identity:
+        if packet.get("wheel_id") not in WHEELS:
+            raise ValueError("wheel_id must be front_left or front_right")
+        if not isinstance(packet.get("device_id"), str) or not DEVICE_ID.fullmatch(packet["device_id"]):
+            raise ValueError("device_id must be a lowercase colon-separated MAC address")
+        return packet["wheel_id"], packet["device_id"]
+    return "legacy", ""
+
+
+def packet_identity(packet):
+    """Return a wheel/device/role/boot stream key; v1 never inherits v2 identity."""
+    wheel, device = wheel_identity(packet, required=packet.get("v") == 2)
+    return wheel, device, packet["node_id"], packet["boot_id"].lower()
+
+
 def identity(packet):
     integer(packet.get("node_id"), "node_id", 1, 3)
     if not isinstance(packet.get("boot_id"), str) or not BOOT_ID.fullmatch(packet["boot_id"]):
@@ -107,9 +126,12 @@ def decode_packet(data):
         packet = parse_json(data.decode("utf-8"))
         if not isinstance(packet, dict):
             raise ValueError("packet must be a JSON object")
-        if type(packet.get("v")) is not int or packet["v"] != 1:
+        if type(packet.get("v")) is not int or packet["v"] not in (1, 2):
             raise ValueError("unsupported protocol version")
         identity(packet)
+        if packet["v"] == 1 and ("wheel_id" in packet or "device_id" in packet):
+            raise ValueError("legacy packets must not claim v2 identities")
+        wheel_identity(packet, required=packet["v"] == 2)
         if packet.get("type") == "metadata":
             expected_role = {1: "H1", 2: "H2", 3: "CENTER"}[packet["node_id"]]
             if packet.get("role") != expected_role:
@@ -213,6 +235,7 @@ class ClockMapper:
             if not isinstance(entry, dict):
                 raise ValueError("clock mapping must be an object")
             identity(entry)
+            wheel_identity(entry)
             if type(entry.get("calibrated")) is not bool:
                 raise ValueError("clock mapping requires explicit calibrated boolean")
             try:
@@ -224,13 +247,17 @@ class ClockMapper:
             offset = integer(entry.get("offset_ns"), "offset_ns", -(1 << 127), (1 << 127) - 1)
             start = integer(entry.get("valid_from_us", 0), "valid_from_us", 0, INT64_MAX)
             end = integer(entry.get("valid_to_us", INT64_MAX), "valid_to_us", start, INT64_MAX)
-            key = (entry["node_id"], entry["boot_id"].lower())
+            key = packet_identity(entry)
             if key in self.maps:
-                raise ValueError("duplicate node/boot clock mapping")
+                raise ValueError("duplicate wheel/device/node/boot clock mapping")
             self.maps[key] = (entry["calibrated"], slope, offset, start, end)
 
-    def map(self, node_id, boot_id, timestamp_us):
-        mapping = self.maps.get((node_id, boot_id.lower()))
+    def map(self, node_id, boot_id, timestamp_us, wheel_id=None, device_id=None):
+        if wheel_id in (None, "legacy") and device_id in (None, ""):
+            wheel_id, device_id = "legacy", ""
+        else:
+            wheel_identity({"wheel_id": wheel_id, "device_id": device_id}, required=True)
+        mapping = self.maps.get((wheel_id, device_id, node_id, boot_id.lower()))
         if mapping is None:
             return None
         calibrated, slope, offset, start, end = mapping
@@ -244,7 +271,14 @@ class ClockMapper:
 class Recorder:
     """Write a distinct run directory; flush at least once per second in the CLI."""
 
-    def __init__(self, output, clock_mapper=None, clock_document=None):
+    def __init__(self, output, clock_mapper=None, clock_document=None, wheel=None):
+        if wheel is not None and wheel not in WHEELS:
+            raise ValueError("wheel must be front_left or front_right")
+        self.wheel = wheel
+        self.assignments = {}
+        self.device_assignments = {}
+        self.identity_conflicts = 0
+        self.filtered_packets = 0
         output = Path(output)
         output.mkdir(parents=True, exist_ok=True)
         prefix = datetime.now(timezone.utc).strftime("run-%Y%m%dT%H%M%SZ-")
@@ -270,6 +304,19 @@ class Recorder:
         except ValueError:
             self.invalid_packets += 1
             return False
+        wheel, device, node, boot = key = packet_identity(packet)
+        if self.wheel is not None and wheel != self.wheel:
+            self.filtered_packets += 1
+            return False
+        if wheel != "legacy":
+            slot = (wheel, node)
+            if (slot in self.assignments and self.assignments[slot] != device or
+                    device in self.device_assignments and self.device_assignments[device] != slot):
+                self.identity_conflicts += 1
+                self.invalid_packets += 1
+                return False
+            self.assignments[slot] = device
+            self.device_assignments[device] = slot
         envelope = {
             "receive_epoch_ns": receive_epoch_ns,
             "receive_monotonic_ns": receive_monotonic_ns,
@@ -280,12 +327,11 @@ class Recorder:
         if packet["type"] == "metadata":
             self.metadata_file.write(json.dumps(envelope, separators=(",", ":")) + "\n")
             return True
-        key = (packet["node_id"], packet["boot_id"].lower())
         tracker = self.streams.setdefault(key, SequenceTracker())
         for sample in packet["samples"]:
-            mapped = self.clock_mapper.map(*key, sample["t_us"])
+            mapped = self.clock_mapper.map(node, boot, sample["t_us"], wheel, device)
             row = {name: envelope[name] for name in CSV_FIELDS[:4]}
-            row.update(node_id=packet["node_id"], boot_id=packet["boot_id"])
+            row.update(wheel_id=wheel, device_id=device, node_id=node, boot_id=packet["boot_id"])
             row.update({name: sample[name] for name in SAMPLE_FIELDS})
             row.update({name: int(bool(sample["flags"] & (1 << bit)))
                         for bit, name in enumerate(FLAG_NAMES)})
@@ -301,8 +347,13 @@ class Recorder:
         summary = {
             "started_epoch_ns": self.started_epoch_ns, "updated_epoch_ns": time.time_ns(),
             "valid_packets": self.valid_packets, "invalid_packets": self.invalid_packets,
-            "streams": [{"node_id": node, "boot_id": boot, **tracker.summary()}
-                        for (node, boot), tracker in sorted(self.streams.items())],
+            "identity_conflicts": self.identity_conflicts, "filtered_packets": self.filtered_packets,
+            "wheel_filter": self.wheel,
+            "assignments": [{"wheel_id": wheel, "node_id": node, "device_id": device}
+                            for (wheel, node), device in sorted(self.assignments.items())],
+            "streams": [{"wheel_id": wheel, "device_id": device, "node_id": node,
+                         "boot_id": boot, **tracker.summary()}
+                        for (wheel, device, node, boot), tracker in sorted(self.streams.items())],
         }
         temporary = self.path / "stats.json.tmp"
         temporary.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
@@ -324,6 +375,7 @@ def main(argv=None):
     parser.add_argument("--bind", default="0.0.0.0", help="IPv4 listen address (default: all interfaces)")
     parser.add_argument("--port", type=int, default=5005, help="UDP listen port (default: 5005)")
     parser.add_argument("--duration", type=float, help="stop after this many seconds; otherwise Ctrl+C")
+    parser.add_argument("--wheel", choices=WHEELS, help="accept only this v2 wheel; rejects legacy/unassigned traffic")
     parser.add_argument("--clock-map", type=Path, help="optional externally calibrated per-boot affine mappings")
     arguments = parser.parse_args(argv)
     if not 1 <= arguments.port <= 65535:
@@ -340,7 +392,7 @@ def main(argv=None):
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as receiver:
         receiver.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1 << 20)
         receiver.bind((arguments.bind, arguments.port))
-        recorder = Recorder(arguments.output, mapper, document)
+        recorder = Recorder(arguments.output, mapper, document, wheel=arguments.wheel)
         print(f"Listening on UDP {arguments.bind}:{arguments.port}; recording to {recorder.path}", flush=True)
         started = last_flush = time.monotonic()
         try:
@@ -362,7 +414,8 @@ def main(argv=None):
             pass
         finally:
             recorder.close()
-        print(f"Saved {recorder.valid_packets} valid packets; rejected {recorder.invalid_packets} malformed packets.")
+        print(f"Saved {recorder.valid_packets} valid packets; rejected {recorder.invalid_packets} malformed packets "
+              f"(including {recorder.identity_conflicts} identity conflicts); filtered {recorder.filtered_packets} packets.")
     return 0
 
 

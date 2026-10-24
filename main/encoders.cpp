@@ -244,13 +244,12 @@ Reading encoder_read() {
         // can invalidate one sample; the next snapshot preserves total counts.
         if (!valid) return result;
         result.flags |= SAMPLE_VALID | UNWRAP_CONTINUOUS;
-        const double radians_per_count = config.sign * math::tau / (4.0 * config.ppr);
-        // Convert operands separately to avoid signed subtraction overflow.
-        result.angle_rad = (static_cast<double>(result.raw_count) -
-                            static_cast<double>(config.zero_count)) * radians_per_count;
+        result.angle_rad = math::quadrature_angle(result.raw_count, config.zero_count,
+                                                  config.ppr, config.sign);
         if (previous_sample_valid && result.timestamp_us > previous_sample_time) {
             const double dt_s = (result.timestamp_us - previous_sample_time) / 1e6;
-            result.velocity_rad_s = (result.raw_count - previous_sample_count) * radians_per_count / dt_s;
+            result.velocity_rad_s = math::quadrature_velocity(result.raw_count, previous_sample_count,
+                result.timestamp_us - previous_sample_time, config.ppr, config.sign);
             filtered_velocity = math::low_pass(filtered_velocity, result.velocity_rad_s,
                                                dt_s, config.velocity_filter_tau_s);
             result.filtered_velocity_rad_s = filtered_velocity;

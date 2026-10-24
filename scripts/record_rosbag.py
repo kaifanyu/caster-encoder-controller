@@ -45,14 +45,22 @@ def main():
     defaults = next((path for path in (Path("/opt/ros/jazzy/setup.bash"),
                                       Path("/opt/ros/humble/setup.bash")) if path.is_file()), None)
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--wheel", choices=("front_left", "front_right"), required=True)
+    parser.add_argument("--port", type=int, help="UDP port (default: left 5005, right 5006)")
+    parser.add_argument("--config", type=Path,
+                        help="wheel inventory YAML; default: hamr_bringup/config/caster_encoders.yaml")
     parser.add_argument("--ros-setup", type=Path, default=defaults)
     parser.add_argument("--hamr-control", type=Path, default=REPO.parent / "hamr_control")
     parser.add_argument("--duration", type=float, help="record for this many seconds; default: until Ctrl+C")
     parser.add_argument("--output", type=Path, help="new bag directory; default: recordings/rosbags/caster_TIMESTAMP")
     parser.add_argument("--storage", choices=("auto", "mcap", "sqlite3"), default="auto")
     parser.add_argument("--domain-id", type=int, default=os.environ.get("ROS_DOMAIN_ID", "0"))
-    parser.add_argument("--expected-node-ids", type=int, choices=(1, 2, 3), nargs="+", default=[3])
+    parser.add_argument("--expected-node-ids", type=int, choices=(1, 2, 3), nargs="+", default=[1, 2, 3])
     args = parser.parse_args()
+    if args.port is None:
+        args.port = 5005 if args.wheel == "front_left" else 5006
+    if not 1 <= args.port <= 65535:
+        parser.error("--port must be in 1..65535")
     if args.duration is not None and (not math.isfinite(args.duration) or args.duration <= 0):
         parser.error("--duration must be finite and positive")
     if not 0 <= args.domain_id <= 232:
@@ -63,7 +71,8 @@ def main():
     bridge, recorder = scripts / "caster_encoder_bridge", scripts / "record_hamr_test_bag"
     relay = REPO / "scripts" / "relay_windows.py"
     qos = scripts.parent / "config" / "record_qos.yaml"
-    for path in (bridge, recorder, relay, qos):
+    config = (args.config or scripts.parent / "config" / "caster_encoders.yaml").resolve()
+    for path in (bridge, recorder, relay, qos, config):
         if not path.is_file():
             parser.error(f"Required file missing: {path}")
     destination = (args.output or REPO / "recordings" / "rosbags" /
@@ -101,13 +110,17 @@ def main():
                    HAMR_BAG_STORAGE_ID=storage, STORAGE_ID=storage,
                    HAMR_BAG_QOS_OVERRIDES=str(qos))
         print(f"Bag: {destination}\nStorage: {storage}; ROS domain: {args.domain_id}\n"
-              f"Relay: Windows UDP 5005 -> WSL {target}:5005\n"
+              f"Wheel: {args.wheel}; relay: Windows UDP {args.port} -> WSL {target}:{args.port}\n"
               "Passive recording only. Ctrl+C finalizes the bag.", flush=True)
         commands = {
             "recorder": ["bash", str(recorder), destination.name, str(destination)],
-            "bridge": [ros_python, str(bridge), "--ros-args", "-p", "udp_port:=5005",
+            "bridge": [ros_python, str(bridge), "--ros-args",
+                       "-r", f"__node:=caster_encoder_{args.wheel}", "--params-file", str(config),
+                       "-p", f"wheel_id:={args.wheel}", "-p", "require_config:=true",
+                       "-p", "legacy_mode:=false", "-p", f"udp_port:={args.port}",
                        "-p", "expected_node_ids:=[" + ",".join(map(str, args.expected_node_ids)) + "]"],
-            "relay": [sys.executable, str(relay), "--target-ip", target],
+            "relay": [sys.executable, str(relay), "--target-ip", target,
+                      "--listen-port", str(args.port), "--target-port", str(args.port)],
         }
         if args.duration is not None:
             commands["relay"].extend(["--duration", str(args.duration + 10)])

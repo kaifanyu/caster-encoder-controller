@@ -1,9 +1,22 @@
 #pragma once
 #include "encoders.h"
-#if __has_include("local.h")
-#include "local.h"
+// CMake fixes the selected profile and wheel identity together.
+#ifndef CASTER_CONFIG_HEADER
+#error "Select front_left or front_right with scripts/idf.sh"
+#endif
+enum { kSelectedWheelIndex = CASTER_WHEEL_INDEX, kSelectedNodeId = CASTER_NODE_ID };
+#include CASTER_CONFIG_HEADER
+static_assert(CASTER_WHEEL_INDEX == kSelectedWheelIndex, "Configuration must not change the wheel");
+static_assert(CASTER_NODE_ID == kSelectedNodeId, "Configuration must not change the role");
+#ifdef CASTER_WHEEL_ID
+#error "Do not override CASTER_WHEEL_ID in configuration"
+#endif
+#if CASTER_WHEEL_INDEX == 1
+#define CASTER_WHEEL_ID "front_left"
+#elif CASTER_WHEEL_INDEX == 2
+#define CASTER_WHEEL_ID "front_right"
 #else
-#include "example.h"
+#error "Unknown wheel profile"
 #endif
 
 static_assert(CASTER_NODE_ID >= 1 && CASTER_NODE_ID <= 3, "Unknown role");
@@ -14,7 +27,9 @@ static_assert(1000000 % SAMPLE_HZ == 0 && 1000 % TRANSMIT_HZ == 0,
 static_assert(UDP_PORT > 0 && UDP_PORT <= 65535, "Invalid UDP port");
 
 namespace caster {
-constexpr const char* kFirmwareVersion = "0.1.0";
+constexpr const char* kFirmwareVersion = "0.2.1";
+constexpr const char* kWheel = CASTER_WHEEL_ID;
+constexpr const char* kLocalIpv4 = CASTER_NODE_ID == 1 ? H1_IPV4 : CASTER_NODE_ID == 2 ? H2_IPV4 : CENTER_IPV4;
 constexpr const char* kRole = CASTER_NODE_ID == 1 ? "H1" : CASTER_NODE_ID == 2 ? "H2" : "CENTER";
 inline EncoderConfig configuration() {
     EncoderConfig c{};

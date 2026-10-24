@@ -11,18 +11,22 @@ from collections import Counter
 import csv
 import math
 from pathlib import Path
+import re
 
 
 REQUIRED_FIELDS = ("node_id", "boot_id", "seq", "t_us", "position14", "flags")
-OUTPUT_FIELDS = (*REQUIRED_FIELDS, "estimated_velocity_rad_s", "interval_us",
+IDENTITY_FIELDS = ("wheel_id", "device_id")
+WHEELS = ("front_left", "front_right")
+DEVICE_ID = re.compile(r"(?:[0-9a-f]{2}:){5}[0-9a-f]{2}")
+OUTPUT_FIELDS = (*IDENTITY_FIELDS, *REQUIRED_FIELDS, "estimated_velocity_rad_s", "interval_us",
                  "status", "provisional_sign")
 READY_AND_VALID = (1 << 0) | (1 << 1)
 SPI_ERRORS = (1 << 7) | (1 << 12)
 BINS = 16384
 
 
-def estimate_rows(rows, *, max_gap_ms=25.0, sign=1):
-    """Yield CENTER rows in arrival order, without joining different boots.
+def estimate_rows(rows, *, max_gap_ms=25.0, sign=1, wheel=None):
+    """Yield CENTER rows without joining different wheels, devices, or boots.
 
     Invalid samples and duplicate/reordered rows never become endpoints. The
     last good endpoint survives them, subject to the actual elapsed-time guard.
@@ -33,31 +37,53 @@ def estimate_rows(rows, *, max_gap_ms=25.0, sign=1):
         raise ValueError("max_gap_ms must be finite and positive")
     if sign not in (-1, 1):
         raise ValueError("sign must be -1 or 1")
+    if wheel is not None and wheel not in WHEELS:
+        raise ValueError("wheel must be front_left or front_right")
     previous = {}
     highest_sequence = {}
+    assignments = {}
+    device_wheels = {}
     for row in rows:
         if row["node_id"] != "3":
             continue
-        result = {name: row.get(name, "") for name in REQUIRED_FIELDS}
+        result = {name: row.get(name, "") for name in (*IDENTITY_FIELDS, *REQUIRED_FIELDS)}
         result.update(estimated_velocity_rad_s="", interval_us="",
                       status="invalid_sample", provisional_sign=sign)
+        wheel_id, device = row.get("wheel_id", ""), row.get("device_id", "")
+        if wheel_id in ("", "legacy") and not device:
+            wheel_id, device = "legacy", ""
+        elif wheel_id not in WHEELS or not isinstance(device, str) or not DEVICE_ID.fullmatch(device):
+            result["status"] = "invalid_identity"
+            yield result
+            continue
+        result.update(wheel_id=wheel_id, device_id=device)
+        if wheel is not None and wheel_id != wheel:
+            continue
+        if device:
+            if assignments.get(wheel_id, device) != device or device_wheels.get(device, wheel_id) != wheel_id:
+                result["status"] = "identity_conflict"
+                yield result
+                continue
+            assignments[wheel_id] = device
+            device_wheels[device] = wheel_id
         try:
-            boot = row["boot_id"]
+            boot = row["boot_id"].lower()
             sequence = int(row["seq"])
             timestamp = int(row["t_us"])
             flags_text = row["flags"]
             flags = int(flags_text, 16 if flags_text.lower().startswith("0x") else 10)
-            if not boot or sequence < 0 or timestamp < 0 or flags < 0:
+            if not re.fullmatch(r"[0-9a-f]{16}", boot) or sequence < 0 or timestamp < 0 or flags < 0:
                 raise ValueError("invalid sample identity or flags")
         except (TypeError, ValueError, AttributeError):
             yield result
             continue
-        highest = highest_sequence.get(boot, -1)
+        stream = (wheel_id, device, boot)
+        highest = highest_sequence.get(stream, -1)
         if sequence <= highest or row.get("sequence_status") == "duplicate":
             result["status"] = "duplicate" if sequence == highest or row.get("sequence_status") == "duplicate" else "reordered"
             yield result
             continue
-        highest_sequence[boot] = sequence
+        highest_sequence[stream] = sequence
         try:
             position = int(row["position14"])
             if not 0 <= position < BINS:
@@ -68,7 +94,7 @@ def estimate_rows(rows, *, max_gap_ms=25.0, sign=1):
         if flags & READY_AND_VALID != READY_AND_VALID or flags & SPI_ERRORS:
             yield result
             continue
-        before = previous.get(boot)
+        before = previous.get(stream)
         if before is None:
             result["status"] = "first_sample"
         else:
@@ -91,7 +117,7 @@ def estimate_rows(rows, *, max_gap_ms=25.0, sign=1):
                     delta += BINS
                 result["estimated_velocity_rad_s"] = sign * delta * math.tau * 1e6 / (BINS * interval_us)
                 result["status"] = "estimated"
-        previous[boot] = (timestamp, position)
+        previous[stream] = (timestamp, position)
         yield result
 
 
@@ -103,6 +129,8 @@ def main(argv=None):
                         help="maximum endpoint interval; not a verified physical rate bound (default: 25)")
     parser.add_argument("--sign", type=int, choices=(-1, 1), default=1,
                         help="provisional direction sign (default: 1)")
+    parser.add_argument("--wheel", choices=WHEELS,
+                        help="select one identified wheel; use separate runs for different signs")
     args = parser.parse_args(argv)
     if not math.isfinite(args.max_gap_ms) or args.max_gap_ms <= 0:
         parser.error("--max-gap-ms must be finite and positive")
@@ -119,7 +147,7 @@ def main(argv=None):
             with destination.open("w", newline="", encoding="utf-8") as output:
                 writer = csv.DictWriter(output, fieldnames=OUTPUT_FIELDS)
                 writer.writeheader()
-                for row in estimate_rows(reader, max_gap_ms=args.max_gap_ms, sign=args.sign):
+                for row in estimate_rows(reader, max_gap_ms=args.max_gap_ms, sign=args.sign, wheel=args.wheel):
                     writer.writerow(row)
                     counts[row["status"]] += 1
     except OSError as error:

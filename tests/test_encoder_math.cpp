@@ -52,6 +52,47 @@ void count_rollover_checks() {
     assert(wrapped_delta32(0xffffffff, 0) == -1);
 }
 
+void quadrature_motion_checks() {
+    // 2048 PPR means 8192 x4 counts: one turn in one second = 60 RPM.
+    for (const int sign : {-1, 1}) {
+        assert(close(quadrature_angle(8192 + 123, 123, 2048, sign), sign * tau));
+        assert(close(quadrature_velocity(8192, 0, 1000000, 2048, sign), sign * tau));
+        assert(close(quadrature_velocity(0, 8192, 1000000, 2048, sign), -sign * tau));
+        assert(close(quadrature_velocity(4096, 0, 500000, 2048, sign), sign * tau));
+        assert(close(quadrature_angle(-4096, 0, 1024, sign), -sign * tau));
+        assert(quadrature_velocity(25, 25, 5000, 2048, sign) == 0);
+    }
+    assert(std::isnan(quadrature_velocity(1, 0, 0, 2048, 1)));
+    assert(std::isnan(quadrature_velocity(1, 0, -5000, 2048, 1)));
+    CountExtender count;
+    const auto before = count.update(0x7ffffffe);
+    const auto after = count.update(0x80000002);
+    assert(close(quadrature_velocity(after, before, 5000, 2048, 1), 4 * tau / 8192 / .005));
+    // Large offsets must not round a single count into zero; opposite extremes
+    // must never trigger signed overflow (also checked with UBSan).
+    const int64_t large = int64_t{1} << 54;
+    assert(close(quadrature_angle(large + 1, large, 2048, 1), tau / 8192));
+    assert(close(quadrature_velocity(-large - 1, -large, 5000, 2048, 1), -tau / 8192 / .005));
+    assert(count_difference(INT64_MAX, INT64_MIN) == static_cast<double>(UINT64_MAX));
+    assert(count_difference(INT64_MIN, INT64_MAX) == -static_cast<double>(UINT64_MAX));
+}
+
+void absolute_known_speed_checks() {
+    for (const int sign : {-1, 1}) {
+        AbsoluteTracker tracker;
+        const auto first = tracker.update(0, 1000, 600, true, sign, .2);
+        // 128 bins every 7812.5 us: exactly one revolution per second.
+        // Two revolutions exercise accumulation, wrapping, sign, and zero.
+        for (int i = 1; i <= 256; ++i) {
+            const int64_t time = 1000 + i * 15625LL / 2;
+            const auto step = tracker.update((i * 128) % absolute_bins, time, 600, true, sign, .2);
+            assert(step.continuous && step.velocity_valid);
+            assert(close(step.angle_rad - first.angle_rad, sign * i * 128 * tau / absolute_bins));
+            assert(close(step.velocity_rad_s, sign * tau, .001));
+        }
+    }
+}
+
 void absolute_wrap_checks() {
     int delta = 0;
     assert(absolute_delta(0, 16383, delta) && delta == 1);
@@ -219,6 +260,8 @@ void continuity_diagnostic_checks() {
 int main() {
     parity_checks();
     count_rollover_checks();
+    quadrature_motion_checks();
+    absolute_known_speed_checks();
     absolute_wrap_checks();
     ambiguity_checks();
     continuity_diagnostic_checks();

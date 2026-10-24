@@ -1,6 +1,6 @@
 # HAMR caster encoders
 
-One ESP-IDF project runs on three **Seeed XIAO ESP32-C6** boards. Each board reads its own encoder, calculates angle and angular velocity, and sends timestamped samples over Wi-Fi. A Python logger saves the measurements on your computer as JSONL and CSV.
+One ESP-IDF project runs on six **Seeed XIAO ESP32-C6** boards: H1, H2, and CENTER on each of the **front-left** and **front-right** wheels. Each board reads its own encoder, calculates angle and angular velocity, and sends timestamped samples over Wi-Fi. A Python logger saves the measurements on your computer as JSONL and CSV.
 
 | Firmware role | Hardware | Measurement |
 |---|---|---|
@@ -8,12 +8,11 @@ One ESP-IDF project runs on three **Seeed XIAO ESP32-C6** boards. Each board rea
 | `H2` | AMT132S-V + SN74LVC244ADW | Hemisphere 2 rotation |
 | `CENTER` | AMT252B-V, direct SPI | Common-rod angle |
 
-All three boards use this repository; select their role when building. Each node has its own battery and UBEC. No wires connect rotating nodes. The default receiver is your computer on the same Wi-Fi network; a fourth ESP32 is not needed.
+All six boards use this repository; select both their wheel and role when building. Each node has its own battery and UBEC. No wires connect rotating nodes. The default receiver is your computer on the same Wi-Fi network; an extra ESP32 receiver is not needed.
 
 ```text
-H1 encoder     -> H1 XIAO     ─┐
-H2 encoder     -> H2 XIAO      ├─ Wi-Fi / UDP -> computer -> JSONL + CSV
-CENTER encoder -> CENTER XIAO ─┘
+front_left  H1/H2/CENTER -> Pi UDP 5005 -> /caster_encoder/front_left/...
+front_right H1/H2/CENTER -> Pi UDP 5006 -> /caster_encoder/front_right/...
 ```
 
 ## 1. Check the wiring
@@ -48,40 +47,57 @@ automatically for each command. Set `CASTER_IDF_PATH` to use another native
 installation directory. This does not activate ESP-IDF in your parent shell.
 
 ```bash
-cd ~/caster-encoder-controller
-cp config/example.h config/local.h
+cd /home/para/encoder-controller
+cp -n config/front_left.example.h config/front_left.local.h
+cp -n config/front_right.example.h config/front_right.local.h
 ```
 
-Edit `config/local.h` before building:
+Edit these two private files; they are ignored by Git:
 
-- Set `WIFI_SSID`, `WIFI_PASSWORD`, and your computer's address in `RECEIVER_IPV4`. Use a **2.4 GHz** network with a reachable receiver on the same local network and allow incoming UDP port **5005** on the computer.
-- Start with the example's **200 Hz sampling** and **100 Hz transmission**, with two samples per datagram.
-- Keep `H1_PPR` / `H2_PPR` at the tentative **2048** and their verification flags false until you measure them. Each node has its own sign and software zero settings.
-- Set physically justified maximum rotation rates before marking the corresponding `*_MAX_RPM_VERIFIED` flags true. CENTER's unwrapped turns are not trusted by default; its valid single-turn absolute position remains available.
+| Configuration file | Physical boards | Pi UDP destination |
+|---|---|---|
+| `config/front_left.local.h` | Front-left H1, H2, CENTER | `RECEIVER_IPV4`, default port **5005** |
+| `config/front_right.local.h` | Front-right H1, H2, CENTER | `RECEIVER_IPV4`, default port **5006** |
 
-The private configuration is ignored by Git. Wi-Fi settings are compiled into the firmware; rebuild and flash after changing them. Give the receiver a stable address, such as a router DHCP reservation. Wi-Fi client isolation or a guest network can prevent delivery even when all devices are connected.
+In **both** files set `WIFI_SSID`, `WIFI_PASSWORD`, and `RECEIVER_IPV4` to the Pi's address. Use a **2.4 GHz** network permitting communication between clients, and allow incoming UDP **5005 and 5006** on the Pi. Reserve the Pi's IP in the router so the compiled destination remains valid. `RECEIVER_IPV4` is always the receiver's IP, not an ESP32 address.
+
+For the Ubuntu hotspot at `10.42.0.1` with the Pi at `10.42.0.14`, set
+`RECEIVER_IPV4` to `"10.42.0.14"` in both wheel files, `NETWORK_GATEWAY` to
+`"10.42.0.1"`, and `NETWORK_NETMASK` to `"255.255.255.0"` for a `/24` hotspot.
+Keep left `UDP_PORT 5005`, right `UDP_PORT 5006`. Empty per-board IPv4 strings
+use DHCP; gateway/netmask macros are applied only for a configured static IP.
+
+Each file independently configures H1/H2 PPR, H1/H2/CENTER signs, zeros, and maximum-rate assumptions. Keep verification flags false until measured. Shared defaults are in `config/example.h`; override rates or filters **before** its include in the private wheel file. The original `config/local.h` is no longer read. For this workspace its existing Wi-Fi/receiver settings were copied into both private wheel files, and its calibration/rate settings into front-left only. This assumes the original assembly is front-left; verify that physical assignment before flashing. Front-right retains the example calibration and false verification flags. On another checkout, migrate existing settings manually as appropriate.
+
+For each ESP32's **own IP address**, use either:
+
+- DHCP: leave `H1_IPV4`, `H2_IPV4`, and `CENTER_IPV4` empty; optionally reserve a unique address in the router against the board's `device_id` (its Wi-Fi STA MAC).
+- Static addressing: set those three macros independently in each wheel file, and set `NETWORK_GATEWAY` / `NETWORK_NETMASK` for the network. For example, left `192.168.1.111/.112/.113` and right `192.168.1.121/.122/.123`. Choose unused addresses outside the DHCP allocation pool. No DNS is required because the receiver is a literal IPv4 address.
+
+Wheel identity is fixed by the build command, and device identity is read from the chip's stable Wi-Fi STA MAC. IP changes do not change either identity. Never redefine `CASTER_WHEEL_ID`, `CASTER_WHEEL_INDEX`, or `CASTER_NODE_ID` in a configuration header.
+
+Wi-Fi and calibration settings are compiled into the firmware; rebuild and flash the affected boards after changing them. Normally the three boards on a wheel share one receiver/port. A special per-role destination can be expressed with `#if CASTER_NODE_ID == 1` / `2` / `3` around `RECEIVER_IPV4` and `UDP_PORT` definitions, but the Pi must then have listeners on each configured destination.
 
 ## 3. Build and upload each board
 
-Build the three roles:
+Label the six physical boards with wheel **and** role before flashing. Build directories and SDK configurations are independent: `build/front_left/H1/`, `build/front_left/H2/`, and so on. Use the matching command with one board connected at a time:
 
 ```bash
-./scripts/idf.sh H1 build
-./scripts/idf.sh H2 build
-./scripts/idf.sh CENTER build
+# Disconnect battery/UBEC before attaching USB. Replace the serial path as needed.
+./scripts/idf.sh front_left H1 -p /dev/ttyACM0 flash monitor
+./scripts/idf.sh front_left H2 -p /dev/ttyACM0 flash monitor
+./scripts/idf.sh front_left CENTER -p /dev/ttyACM0 flash monitor
+
+./scripts/idf.sh front_right H1 -p /dev/ttyACM0 flash monitor
+./scripts/idf.sh front_right H2 -p /dev/ttyACM0 flash monitor
+./scripts/idf.sh front_right CENTER -p /dev/ttyACM0 flash monitor
 ```
 
-Each role has its own directory under `build/`. Label the physical boards before flashing them so H1 and H2 stay distinguishable.
+These are **six separate operations**, each on the board named by that line. Exit each serial monitor with **Ctrl+]**, disconnect that board, and connect the next board before its command. `flash` builds first when needed. To build without a connected board, replace `-p /dev/ttyACM0 flash monitor` with `build`.
 
-With the battery/UBEC disconnected, connect one board over a USB data cable. On Linux, check its port with `ls /dev/ttyACM* /dev/ttyUSB*`, then upload the matching role:
+The startup log prints `wheel`, `role`, `device_id`, `boot_id`, and the Pi UDP destination. Record the six MAC/device IDs in the Pi's `hamr_bringup/config/caster_encoders.yaml` inventory (`expected_device_ids: ["H1_MAC", "H2_MAC", "CENTER_MAC"]` under `/caster_encoder_front_left` or `/caster_encoder_front_right` → `ros__parameters`). This binds each ROS role to the intended physical board. The optional `expected_source_ips` array uses the same H1/H2/CENTER order; set it only when those addresses are reserved or static. Firmware credentials are never printed. ESP32s send UDP; the Pi bridge publishes ROS topics.
 
-```bash
-./scripts/idf.sh H1 -p /dev/ttyACM0 flash monitor
-```
-
-Repeat with `H2` and `CENTER`. Substitute your actual device path. Exit the serial monitor with **Ctrl+]**. If a board will not enter its bootloader, hold **BOOT**, tap **RESET**, release **BOOT**, and retry. The helper's Docker USB path is intended for Linux; on macOS or Windows use a native ESP-IDF v5.4.2 environment for USB flashing.
-
-The startup log identifies the role, GPIOs, firmware version, reset reason, and PPR assumption. USB is only for stationary programming/debugging. After disconnecting USB, reconnect that node's normal power and keep it still while starting.
+On Linux find USB ports with `ls /dev/ttyACM* /dev/ttyUSB*`. If a board will not enter its bootloader, hold **BOOT**, tap **RESET**, release **BOOT**, and retry. Docker USB flashing is intended for Linux; on macOS or Windows use a native ESP-IDF v5.4.2 environment. After disconnecting USB, reconnect the node's normal power and keep it still while starting.
 
 ### CENTER bench check over USB
 
@@ -97,6 +113,15 @@ return close to its starting value. Check that velocity changes sign when you
 reverse direction and that `spi_invalid` stays zero. The software zero is not a
 verified physical reference until you calibrate it.
 
+With `CENTER_MAX_RPM_VERIFIED false`, `velocity_rad_s` and
+`unwrapped_angle_rad` are deliberately `nan` (`null` in UDP). First test wrapped
+position, then establish a physical maximum speed before setting this flag true
+in the matching wheel file and reflashing CENTER. The maximum is an upper bound,
+not a commanded speed. At 600 RPM the interval between valid reads must be
+strictly below about 49.988 ms; the default 200 Hz target is 5 ms. A slower bound
+must never be chosen merely to hide an acquisition gap. The offline estimator
+below can give provisional velocity for a controlled slow bench run.
+
 If `unwrapped_angle_rad` becomes `nan`, a one-time warning reports the first
 continuity-loss reason, the interval between valid samples in microseconds,
 and the shortest wrapped candidate displacement in encoder bins. The wrapped
@@ -106,13 +131,13 @@ leaves velocity unavailable. Retain the startup and warning lines when debugging
 Disconnected Wi-Fi and increasing `radio_failures` are expected in this USB check.
 
 When building in WSL with the board attached to Windows, use
-`python3 scripts/flash_windows.py CENTER --port COM6` (substitute its Windows COM
+`python3 scripts/flash_windows.py front_left CENTER --port COM6` (substitute its Windows COM
 port). This builds with `scripts/idf.sh` and uses Windows PlatformIO's Python and
-esptool to flash the images listed in `build/CENTER/flasher_args.json`. Add
+esptool to flash the images listed in `build/front_left/CENTER/flasher_args.json`. Add
 `--dry-run` to validate an existing build and print the command without building,
 resetting, or accessing the serial port; add `--skip-build` to flash an existing
 build. Custom Windows installations can supply `--windows-python` and
-`--esptool-path`. Review `config/local.h` before flashing; the helper does not
+`--esptool-path`. Review the matching `config/<wheel>.local.h` before flashing; the helper does not
 perform a full-chip erase.
 
 `scripts/idf.sh` activates ESP-IDF only inside its own process. The generic
@@ -124,14 +149,17 @@ serial device is connected.
 
 ## 4. Record measurements
 
-Use Python 3.8 or newer on the receiver computer; the logger needs no pip packages:
+For normal Pi operation use the companion `hamr_control` bridge and recorder. Its wheel configuration must match these UDP ports and the six device IDs. ROS topics are under `/caster_encoder/front_left/` and `/caster_encoder/front_right/`; each has `packets`, `metadata`, `diagnostics`, and `H1`, `H2`, `CENTER` `joint_states` topics. The rosbag records both branches separately in one bag.
+
+For a standalone non-ROS bench recording, use Python 3.8 or newer with no pip packages. Start these in two terminals:
 
 ```bash
-python3 host/logger.py --output recordings
+python3 host/logger.py --port 5005 --wheel front_left --output recordings/front_left
+python3 host/logger.py --port 5006 --wheel front_right --output recordings/front_right
 ```
 
 For a Windows computer running WSL, start
-`python3 scripts/log_windows.py --duration 60` from WSL to receive directly in
+`python3 scripts/log_windows.py --wheel front_left --duration 60` from WSL to receive directly in
 Windows and save under `recordings/wifi/`. Set firmware `RECEIVER_IPV4` to the
 computer's **Windows LAN IPv4 address** on the ESP32's Wi-Fi network; the WSL
 address is not the receiver address for this helper. Allow Python to receive
@@ -140,22 +168,29 @@ For the Windows hotspot at `192.168.137.1`, an Administrator PowerShell window
 can run `scripts/allow_hotspot_udp.ps1`. It permits only this Windows Python
 executable to receive UDP 5005 at that address from `192.168.137.0/24`; address,
 subnet, and port are script parameters if the hotspot configuration changes.
+Use `--wheel front_right` for port 5006 and allow that port in the firewall too.
 `--port`, `--output`, and `--duration` override the defaults; omit `--duration`
 to record until Ctrl+C. `--dry-run` prints the command without opening a socket
 or creating recordings. Connect the ESP32 to 2.4 GHz Wi-Fi and keep Windows
 reachable on the same LAN without client isolation.
 
 To record ROS topics on this WSL laptop instead of a standalone CSV run, use
-`python3 scripts/record_rosbag.py --duration 60`. The helper uses the sibling
+`python3 scripts/record_rosbag.py --wheel front_left --duration 60`. This optional
+WSL helper starts one wheel bridge; use `--wheel front_right` for the other wheel.
+For the Pi's normal simultaneous two-wheel recording, use the companion
+`caster_encoders.launch.xml` described above. The helper uses the sibling
 `hamr_control` checkout's existing bridge, bag recorder, topic filter, and QoS
 settings, with the Windows UDP relay in front. It prints a new bag directory
 under `recordings/rosbags/` and selects MCAP when installed, otherwise SQLite.
 Stop the standalone Windows logger first because the relay needs the same
 Windows UDP port. The ROS packet topic retains the ESP acquisition timestamps;
-its source IP and receipt time describe the Windows relay hop into WSL.
+its source IP and receipt time describe the Windows relay hop into WSL. The
+selected wheel's MAC inventory is loaded from `caster_encoders.yaml` (override
+with `--config`). Optional source-IP expectations must match the relay hop for
+this setup, rather than the ESP32's original source address.
 
 For CENTER velocity checks, pass a completed run's `samples.csv` to
-`python3 host/center_velocity.py`. It writes `center_velocity.csv` beside the
+`python3 host/center_velocity.py PATH/TO/samples.csv --wheel front_left`. It writes `center_velocity.csv` beside the
 recording, using wrapped `position14` differences and ESP acquisition timestamps
 instead of Wi-Fi arrival times. These are bench estimates with a provisional
 direction sign; no mechanical zero is needed. Reboots, invalid reads, duplicate
@@ -164,15 +199,22 @@ explicitly. Each estimate still assumes less than half a turn between accepted
 samples; the gap guard does not establish a physical speed bound. Firmware
 validity flags and the original recording are preserved.
 
-Start the nodes and move each encoder slowly to confirm the corresponding node is reporting. Stop recording with **Ctrl+C**, or add `--duration 60` to record for one minute. Each run creates a new `recordings/run-.../` directory:
+History is separated by wheel, MAC, and boot; identity conflicts are rejected.
+Use `--wheel front_right` for a right run. `--sign -1` reverses the provisional
+direction; analyze wheels separately if their physical signs differ, and choose
+distinct `--output` paths when selecting both wheels from a combined CSV.
 
-- `samples.csv`: decoded samples and computer receive times, convenient for plotting.
-- `packets.jsonl` and `metadata.jsonl`: validated packets and session configuration.
-- `stats.json`: per-node/per-boot reception, missing-sequence, and duplicate counts.
+Only one receiver may bind each UDP port: stop the Pi ROS bridges before using the standalone logger on the same Pi. A `--wheel` filter accepts only matching v2 packets, so a misconfigured right wheel cannot be written into a left run. Without `--wheel`, the logger also accepts legacy v1 recordings/traffic and marks their wheel as `legacy`.
 
-Recordings are ignored by Git. See [the protocol notes](docs/protocol.md) for fields, flags, and the optional measured clock mapping. Missing-sequence totals can decrease when delayed packets arrive; repeated samples remain identifiable.
+Move each labeled encoder slowly and confirm its wheel and role. Stop with **Ctrl+C**, or add `--duration 60`. Each invocation creates a new `run-.../` directory:
 
-Storage is on the receiver computer. The ESP32 keeps a bounded in-memory queue, so measurements can be lost during wireless outages. Acquisition continues, and counters/sequence numbers expose missing data. There is no SD/flash recording or replay of an outage's missing samples. UDP provides no delivery guarantee.
+- `samples.csv`: every row includes `wheel_id`, `device_id`, `node_id`, `boot_id`, and computer receive times.
+- `packets.jsonl` and `metadata.jsonl`: validated packets and configuration with the complete identity.
+- `stats.json`: independent per-wheel/device/role/boot sequence accounting, accepted device assignments, and conflict/filter counts.
+
+The standalone logger locks each wheel/role to its first observed device for that run, and rejects a second device claiming that slot or the same device changing slots. A device reboot creates a separate boot stream. The Pi's explicit device inventory additionally checks assignment from the first packet; always fill it for a physical experiment.
+
+Recordings are ignored by Git. See [the protocol notes](docs/protocol.md) for fields, flags, and measured clock mappings. The ESP32 keeps a bounded in-memory queue; wireless outages can lose samples and there is no outage replay or persistent controller storage. Sequence and diagnostic counters expose losses; UDP provides no delivery guarantee.
 
 ## 5. Understand the measurements
 
@@ -197,7 +239,7 @@ Use the [bench checklist](docs/bench-checklist.md) to verify PPR, signs, wrap be
 
 ```bash
 ./scripts/test.sh
+./scripts/test_protocol.sh  # Actual serializer + pinned SDK cJSON; native SDK or Docker.
 ```
 
-This runs portable C++ encoder-math tests and Python logger/protocol tests using `g++` and Python 3. CI also builds all three firmware roles with ESP-IDF v5.4.2. Firmware sources live in `main/`; configuration examples are in `config/`; receiver code is in `host/`.
-# caster-encoder-controller
+This runs portable C++ encoder-math tests and Python logger/protocol tests using `g++` and Python 3. CI also builds all six wheel/role combinations with ESP-IDF v5.4.2. Firmware sources live in `main/`; configuration examples are in `config/`; receiver code is in `host/`.

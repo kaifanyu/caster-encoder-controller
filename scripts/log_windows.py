@@ -16,7 +16,8 @@ from flash_windows import capture, linux_path, windows_path
 def main():
     repo = Path(__file__).resolve().parent.parent
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--port", type=int, default=5005, help="UDP port (default: 5005)")
+    parser.add_argument("--wheel", choices=("front_left", "front_right"), required=True)
+    parser.add_argument("--port", type=int, help="UDP port (default: left 5005, right 5006)")
     parser.add_argument("--duration", type=float, help="stop after this many seconds; otherwise Ctrl+C")
     parser.add_argument("--output", type=Path, default=repo / "recordings" / "wifi",
                         help="recording parent directory (default: recordings/wifi in this repository)")
@@ -25,6 +26,8 @@ def main():
     parser.add_argument("--dry-run", action="store_true",
                         help="print the command without opening a socket or creating recordings")
     args = parser.parse_args()
+    if args.port is None:
+        args.port = 5005 if args.wheel == "front_left" else 5006
     if not 1 <= args.port <= 65535:
         parser.error("--port must be in 1..65535")
     if args.duration is not None and (not math.isfinite(args.duration) or args.duration <= 0):
@@ -48,6 +51,7 @@ def main():
         parser.error("--output must be a directory")
     command = [str(python_exe), "-u", windows_path(logger),
                "--bind", args.bind, "--port", str(args.port),
+               "--wheel", args.wheel,
                "--output", windows_path(output)]
     if args.duration is not None:
         command.extend(["--duration", str(args.duration)])

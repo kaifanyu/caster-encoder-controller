@@ -16,7 +16,10 @@ jobs:
     strategy:
       matrix:
         role: [H1, H2, CENTER]
+        wheel: [front_left, front_right]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - run: cp config/example.h config/local.h
-      - run: ./scripts/idf.sh "${{ matrix.role }}" build
+      - run: cp "config/${{ matrix.wheel }}.example.h" "config/${{ matrix.wheel }}.local.h"
+      - run: ./scripts/idf.sh "${{ matrix.wheel }}" "${{ matrix.role }}" build
+      - if: matrix.wheel == 'front_left' && matrix.role == 'H1'
+        run: ./scripts/test_protocol.sh

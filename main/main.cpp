@@ -68,7 +68,7 @@ void transmit(void*) {
             }
         }
         if (count) {
-            char* data = caster::serialize_samples(boot_id, batch, count, diagnostics);
+            char* data = caster::serialize_samples(boot_id, caster::transport_device_id(), batch, count, diagnostics);
             if (!caster::transport_send(data)) diagnostics.radio_failures.fetch_add(1);
             free(data);
         }
@@ -78,7 +78,7 @@ void transmit(void*) {
             last_reconnect = now;
         }
         if (now - last_metadata >= 2000000) {
-            char* data = caster::serialize_metadata(boot_id, config, reset_reason);
+            char* data = caster::serialize_metadata(boot_id, caster::transport_device_id(), config, reset_reason);
             if (!caster::transport_send(data)) diagnostics.radio_failures.fetch_add(1);
             free(data);
             last_metadata = now;
@@ -124,8 +124,8 @@ extern "C" void app_main() {
     ESP_ERROR_CHECK(gpio_set_level(GPIO_NUM_14, 0));
     reset_reason = static_cast<int>(esp_reset_reason());
     const auto config = caster::configuration();
-    ESP_LOGI(TAG, "firmware=%s IDF=%s role=%s node=%d reset_reason=%d",
-             caster::kFirmwareVersion, esp_get_idf_version(), caster::kRole, CASTER_NODE_ID, reset_reason);
+    ESP_LOGI(TAG, "firmware=%s IDF=%s wheel=%s role=%s node=%d reset_reason=%d",
+             caster::kFirmwareVersion, esp_get_idf_version(), caster::kWheel, caster::kRole, CASTER_NODE_ID, reset_reason);
     ESP_LOGI(TAG, "GPIO: %s; onboard RF GPIO3=0 GPIO14=0",
              CASTER_NODE_ID == 3 ? "CS=21 SCLK=19 MISO=20 MOSI=18" : "A=0 B=1 Z=2");
     if (CASTER_NODE_ID != 3)
@@ -143,8 +143,8 @@ extern "C" void app_main() {
     caster::transport_init();
     // Generate the session identifier with the RF entropy source active.
     snprintf(boot_id, sizeof(boot_id), "%08" PRIx32 "%08" PRIx32, esp_random(), esp_random());
-    ESP_LOGI(TAG, "boot_id=%s UDP receiver=%s:%d sample=%dHz transmit=%dHz clock_sync=INVALID",
-             boot_id, RECEIVER_IPV4, UDP_PORT, SAMPLE_HZ, TRANSMIT_HZ);
+    ESP_LOGI(TAG, "wheel=%s role=%s device_id=%s boot_id=%s UDP receiver=%s:%d sample=%dHz transmit=%dHz clock_sync=INVALID",
+             caster::kWheel, caster::kRole, caster::transport_device_id(), boot_id, RECEIVER_IPV4, UDP_PORT, SAMPLE_HZ, TRANSMIT_HZ);
     caster::encoder_init(config);
     samples_queue = xQueueCreate(64, sizeof(caster::Sample));
     ESP_ERROR_CHECK(samples_queue ? ESP_OK : ESP_ERR_NO_MEM);

@@ -8,12 +8,14 @@
 #include "lwip/sockets.h"
 #include <fcntl.h>
 #include <cstring>
+#include <cstdio>
 
 namespace caster {
 namespace {
 std::atomic<bool> connected{false};
 int udp_socket = -1;
 sockaddr_in destination{};
+char device_id[18]{};
 void network_event(void*, esp_event_base_t base, int32_t id, void*) {
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED)
         connected.store(false);
@@ -29,7 +31,16 @@ void transport_init() {
     ESP_ERROR_CHECK(nvs_flash_init());
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
-    ESP_ERROR_CHECK(esp_netif_create_default_wifi_sta() ? ESP_OK : ESP_ERR_NO_MEM);
+    esp_netif_t* netif = esp_netif_create_default_wifi_sta();
+    ESP_ERROR_CHECK(netif ? ESP_OK : ESP_ERR_NO_MEM);
+    if (kLocalIpv4[0] != '\0') {
+        esp_netif_ip_info_t address{};
+        ESP_ERROR_CHECK(inet_pton(AF_INET, kLocalIpv4, &address.ip.addr) == 1 ? ESP_OK : ESP_ERR_INVALID_ARG);
+        ESP_ERROR_CHECK(inet_pton(AF_INET, NETWORK_GATEWAY, &address.gw.addr) == 1 ? ESP_OK : ESP_ERR_INVALID_ARG);
+        ESP_ERROR_CHECK(inet_pton(AF_INET, NETWORK_NETMASK, &address.netmask.addr) == 1 ? ESP_OK : ESP_ERR_INVALID_ARG);
+        ESP_ERROR_CHECK(esp_netif_dhcpc_stop(netif));
+        ESP_ERROR_CHECK(esp_netif_set_ip_info(netif, &address));
+    }
     wifi_init_config_t init = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&init));
     ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, network_event, nullptr));
@@ -43,6 +54,10 @@ void transport_init() {
     wifi.sta.threshold.authmode = strlen(WIFI_PASSWORD) ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN;
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi));
+    uint8_t mac[6];
+    ESP_ERROR_CHECK(esp_wifi_get_mac(WIFI_IF_STA, mac));
+    snprintf(device_id, sizeof(device_id), "%02x:%02x:%02x:%02x:%02x:%02x",
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
     ESP_ERROR_CHECK(esp_wifi_start());
     ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
     destination.sin_family = AF_INET;
@@ -54,6 +69,8 @@ void transport_init() {
     ESP_ERROR_CHECK(flags >= 0 && fcntl(udp_socket, F_SETFL, flags | O_NONBLOCK) >= 0 ? ESP_OK : ESP_FAIL);
     transport_reconnect();
 }
+
+const char* transport_device_id() { return device_id; }
 
 bool transport_connected() { return connected.load(); }
 void transport_reconnect() {

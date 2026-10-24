@@ -29,11 +29,13 @@ void unsigned_integer(cJSON* obj, const char* key, uint64_t value) {
     snprintf(buffer, sizeof(buffer), "%" PRIu64, value);
     cJSON_AddRawToObject(obj, key, buffer);
 }
-cJSON* envelope(const char* boot_id, const char* type) {
+cJSON* envelope(const char* boot_id, const char* device_id, const char* type) {
     cJSON* root = cJSON_CreateObject();
     if (!root) return nullptr;
-    cJSON_AddNumberToObject(root, "v", 1);
+    cJSON_AddNumberToObject(root, "v", 2);
     cJSON_AddStringToObject(root, "type", type);
+    cJSON_AddStringToObject(root, "wheel_id", kWheel);
+    cJSON_AddStringToObject(root, "device_id", device_id);
     cJSON_AddNumberToObject(root, "node_id", CASTER_NODE_ID);
     cJSON_AddStringToObject(root, "boot_id", boot_id);
     return root;
@@ -46,9 +48,9 @@ char* finish(cJSON* root) {
 }
 }  // namespace
 
-char* serialize_samples(const char* boot_id, const Sample* samples, int count,
+char* serialize_samples(const char* boot_id, const char* device_id, const Sample* samples, int count,
                         const Diagnostics& diagnostics) {
-    cJSON* root = envelope(boot_id, "samples");
+    cJSON* root = envelope(boot_id, device_id, "samples");
     if (!root) return nullptr;
     cJSON* array = cJSON_AddArrayToObject(root, "samples");
     if (!array) { cJSON_Delete(root); return nullptr; }
@@ -91,14 +93,19 @@ char* serialize_samples(const char* boot_id, const Sample* samples, int count,
     return finish(root);
 }
 
-char* serialize_metadata(const char* boot_id, const EncoderConfig& c, int reset_reason) {
-    cJSON* root = envelope(boot_id, "metadata");
+char* serialize_metadata(const char* boot_id, const char* device_id, const EncoderConfig& c, int reset_reason) {
+    cJSON* root = envelope(boot_id, device_id, "metadata");
     if (!root) return nullptr;
     cJSON_AddStringToObject(root, "firmware_version", kFirmwareVersion);
     cJSON_AddStringToObject(root, "idf_version", esp_get_idf_version());
     cJSON_AddStringToObject(root, "role", kRole);
     cJSON_AddStringToObject(root, "encoder_type", c.role == 3 ? "AMT252B-V" : "AMT132S-V");
     cJSON_AddStringToObject(root, "transport", "wifi_udp");
+    cJSON_AddStringToObject(root, "receiver_ipv4", RECEIVER_IPV4);
+    number(root, "udp_port", UDP_PORT);
+    cJSON_AddStringToObject(root, "configured_ipv4", kLocalIpv4);
+    cJSON_AddStringToObject(root, "network_gateway", NETWORK_GATEWAY);
+    cJSON_AddStringToObject(root, "network_netmask", NETWORK_NETMASK);
     number(root, "reset_reason", reset_reason);
     number(root, "sample_hz", SAMPLE_HZ);
     number(root, "transmit_hz", TRANSMIT_HZ);

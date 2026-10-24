@@ -8,16 +8,16 @@ container_image="espressif/idf:v${sdk_version}@sha256:4317595a911886e04cbc6d7313
 
 usage() {
     cat <<'EOF'
-Usage: ./scripts/idf.sh H1|H2|CENTER [idf.py arguments]
+Usage: ./scripts/idf.sh front_left|front_right H1|H2|CENTER [idf.py arguments]
 
-  ./scripts/idf.sh H1 build
-  ./scripts/idf.sh H1 -p /dev/ttyACM0 flash monitor
-  ./scripts/idf.sh CENTER size
-  python3 scripts/flash_windows.py CENTER --port COM6  # Windows USB from WSL
+  ./scripts/idf.sh front_left H1 build
+  ./scripts/idf.sh front_left H1 -p /dev/ttyACM0 flash monitor
+  ./scripts/idf.sh front_right CENTER size
+  python3 scripts/flash_windows.py front_left CENTER --port COM6
 
 Uses ESP-IDF v5.4.2 from your activated environment, a local installation at
 ~/esp/esp-idf-v5.4.2 (override with CASTER_IDF_PATH), or its Docker image.
-Copy config/example.h to config/local.h and edit it before building.
+Copy config/<wheel>.example.h to config/<wheel>.local.h and edit before building.
 Disconnect the battery/UBEC before connecting USB.
 EOF
 }
@@ -26,8 +26,14 @@ if [[ $# -eq 0 || ${1:-} == --help || ${1:-} == -h ]]; then
     usage
     exit 0
 fi
-role=$1
+wheel=$1
 shift
+case "$wheel" in
+    front_left|front_right) ;;
+    *) printf 'Unknown wheel: %s (use front_left or front_right).\n' "$wheel" >&2; exit 2 ;;
+esac
+role=${1:-}
+if [[ $# -gt 0 ]]; then shift; fi
 case "$role" in
     H1|H2|CENTER) ;;
     *) printf 'Unknown role: %s (use H1, H2, or CENTER).\n' "$role" >&2; exit 2 ;;
@@ -49,22 +55,41 @@ print_flash_hint() {
             '$ports = @(Get-CimInstance Win32_SerialPort | Where-Object { $_.PNPDeviceID -like "*VID_303A&PID_1001*" }); if ($ports.Count -eq 1) { $ports[0].DeviceID }' \
             2>/dev/null | tr -d '\r\n') || windows_port=""
         if [[ "$windows_port" =~ ^COM[1-9][0-9]*$ ]]; then
-            printf '\nESP32 detected on Windows %s. Flash from this directory with:\n  python3 scripts/flash_windows.py %s --port %s\n' \
-                "$windows_port" "$role" "$windows_port"
+            printf '\nESP32 detected on Windows %s. Flash from this directory with:\n  python3 scripts/flash_windows.py %s %s --port %s\n' \
+                "$windows_port" "$wheel" "$role" "$windows_port" >&2
         else
-            printf '\nFor Windows USB from WSL, use scripts/flash_windows.py with the board\047s Windows COM port; see README.md.\n'
+            printf '\nFor Windows USB from WSL, use scripts/flash_windows.py with the board\047s Windows COM port; see README.md.\n' >&2
         fi
     else
-        printf '\nUse ./scripts/idf.sh %s -p YOUR_SERIAL_PORT flash monitor to activate the SDK automatically.\n' "$role"
+        printf '\nUse ./scripts/idf.sh %s %s -p YOUR_SERIAL_PORT flash monitor to activate the SDK automatically.\n' "$wheel" "$role" >&2
     fi
 }
 
-if [[ ! -f "$repo_dir/config/local.h" ]]; then
-    printf 'First copy config/example.h to config/local.h and edit your settings.\n' >&2
+# These options belong to this helper: overriding them could flash a binary
+# from another physical board's build directory.
+expect_define=false
+for argument in "$@"; do
+    if "$expect_define"; then
+        case "$argument" in
+            CASTER_*|SDKCONFIG*|IDF_TARGET*)
+                printf 'Profile option is managed by this helper: %s\n' "$argument" >&2
+                exit 2 ;;
+        esac
+        expect_define=false
+    fi
+    case "$argument" in
+        -D|--define-cache-entry) expect_define=true ;;
+        --define-cache-entry=CASTER_*|--define-cache-entry=SDKCONFIG*|--define-cache-entry=IDF_TARGET*|-DCASTER_*|-DSDKCONFIG*|-DIDF_TARGET*|-B|-B?*|--build-dir|--build-dir=*)
+            printf 'Profile/build option is managed by this helper: %s\n' "$argument" >&2
+            exit 2 ;;
+    esac
+done
+if [[ ! -f "$repo_dir/config/$wheel.local.h" ]]; then
+    printf 'First copy config/%s.example.h to config/%s.local.h and edit your settings.\n' "$wheel" "$wheel" >&2
     exit 2
 fi
 
-mkdir -p "$repo_dir/build/$role"
+mkdir -p "$repo_dir/build/$wheel/$role"
 cd "$repo_dir"
 native_sdk=${CASTER_IDF_PATH:-$HOME/esp/esp-idf-v${sdk_version}}
 active_sdk_version=""
@@ -76,9 +101,9 @@ if [[ "$active_sdk_version" != "ESP-IDF v${sdk_version}" && -f "$native_sdk/expo
     . "$native_sdk/export.sh" >/dev/null
 fi
 if command -v idf.py >/dev/null 2>&1 && [[ $(idf.py --version 2>/dev/null) == "ESP-IDF v${sdk_version}" ]]; then
-    idf.py -B "build/$role" \
-        "-DSDKCONFIG=$repo_dir/build/$role/sdkconfig" \
-        "-DCASTER_ROLE=$role" -DIDF_TARGET=esp32c6 "$@"
+    idf.py -B "build/$wheel/$role" \
+        "-DSDKCONFIG=$repo_dir/build/$wheel/$role/sdkconfig" \
+        "-DCASTER_WHEEL=$wheel" "-DCASTER_ROLE=$role" -DIDF_TARGET=esp32c6 "$@"
     print_flash_hint "$@"
     exit 0
 fi
@@ -106,7 +131,8 @@ if "$expect_port"; then
     exit 2
 fi
 docker_args=(run --rm --init --user "$(id -u):$(id -g)"
-    --volume "$repo_dir:/project" --workdir /project)
+    --volume "$repo_dir:/project" --workdir /project
+    --env CCACHE_DIR=/project/build/.ccache)
 if [[ -t 0 && -t 1 ]]; then
     docker_args+=(-it)
 fi
@@ -118,6 +144,6 @@ if [[ -n "$port" ]]; then
     docker_args+=(--device "$port:$port" --group-add "$(stat -c %g "$port")")
 fi
 docker "${docker_args[@]}" "$container_image" \
-    idf.py -B "build/$role" "-DSDKCONFIG=/project/build/$role/sdkconfig" \
-    "-DCASTER_ROLE=$role" -DIDF_TARGET=esp32c6 "$@"
+    idf.py -B "build/$wheel/$role" "-DSDKCONFIG=/project/build/$wheel/$role/sdkconfig" \
+    "-DCASTER_WHEEL=$wheel" "-DCASTER_ROLE=$role" -DIDF_TARGET=esp32c6 "$@"
 print_flash_hint "$@"

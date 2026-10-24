@@ -101,6 +101,33 @@ class CenterVelocityTests(unittest.TestCase):
         self.assertEqual(len(results), 2)
         self.assert_velocity(results[1], 10, 10000)
 
+    def test_same_boot_on_both_wheels_never_shares_history(self):
+        left = dict(wheel_id="front_left", device_id="aa:bb:cc:dd:ee:01")
+        right = dict(wheel_id="front_right", device_id="aa:bb:cc:dd:ee:02")
+        rows = [sample(0, 1000, 100, **left), sample(0, 1000, 8000, **right),
+                sample(1, 6000, 110, **left), sample(1, 6000, 7995, **right)]
+        results = list(estimate_rows(rows))
+        self.assertEqual([r["status"] for r in results[:2]], ["first_sample"] * 2)
+        self.assert_velocity(results[2], 10, 5000)
+        self.assert_velocity(results[3], -5, 5000)
+        self.assertEqual(results[2]["wheel_id"], "front_left")
+        self.assertEqual(results[3]["device_id"], right["device_id"])
+        selected = list(estimate_rows(rows + [sample(2, 11000, 120)], wheel="front_right", sign=-1))
+        self.assertEqual(len(selected), 2)
+        self.assert_velocity(selected[1], -5, 5000, sign=-1)
+
+    def test_identity_conflicts_and_partial_identity_do_not_change_endpoints(self):
+        left = dict(wheel_id="front_left", device_id="aa:bb:cc:dd:ee:01")
+        rows = [sample(0, 1000, 100, **left),
+                sample(1, 6000, 9000, wheel_id="front_left", device_id="aa:bb:cc:dd:ee:02"),
+                sample(1, 6000, 9000, wheel_id="front_right", device_id=left["device_id"]),
+                sample(1, 6000, 9000, wheel_id="front_left"),
+                sample(2, 11000, 120, **left)]
+        results = list(estimate_rows(rows))
+        self.assertEqual([r["status"] for r in results[1:4]],
+                         ["identity_conflict", "identity_conflict", "invalid_identity"])
+        self.assert_velocity(results[-1], 20, 10000)
+
     def test_cli_writes_adjacent_csv_and_explains_estimate(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "samples.csv"

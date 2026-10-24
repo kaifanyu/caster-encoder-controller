@@ -2,6 +2,7 @@ build/
 sdkconfig
 sdkconfig.old
 config/local.h
+config/*.local.h
 recordings/
 __pycache__/
 *.pyc

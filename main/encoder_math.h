@@ -59,6 +59,26 @@ inline double low_pass(double previous, double value, double dt_s, double tau_s)
     return previous + (-std::expm1(-dt_s / tau_s)) * (value - previous);
 }
 
+// Subtract in the integer domain before converting: adjacent counts must stay
+// distinguishable even above 2^53. Unsigned arithmetic also handles opposite
+// int64 extremes without signed overflow.
+inline double count_difference(int64_t now, int64_t before) {
+    if (now >= before)
+        return static_cast<double>(static_cast<uint64_t>(now) - static_cast<uint64_t>(before));
+    return -static_cast<double>(static_cast<uint64_t>(before) - static_cast<uint64_t>(now));
+}
+
+inline double quadrature_angle(int64_t count, int64_t zero, int ppr, int sign) {
+    return count_difference(count, zero) * sign * tau / (4.0 * ppr);
+}
+
+inline double quadrature_velocity(int64_t count, int64_t previous, int64_t interval_us,
+                                  int ppr, int sign) {
+    if (interval_us <= 0) return std::numeric_limits<double>::quiet_NaN();
+    return count_difference(count, previous) * sign * tau / (4.0 * ppr) /
+           (interval_us / 1e6);
+}
+
 struct AbsoluteStep {
     bool continuous = false;
     bool velocity_valid = false;
