@@ -172,8 +172,22 @@ record format holds 153.6 seconds on the current 4 MiB partition layout.
 
 See the [operator workflow](../hamr_control/docs/LOCAL_CASTER_RECORDING.md) and
 [storage/control protocol](docs/local-recording-protocol.md) for setup, recovery,
-capacity limits, and acquisition qualification. Start never overwrites an
-unacknowledged recording, and boot/reconnect never starts a new recording.
+capacity limits, and acquisition qualification. Normal start protects
+unacknowledged recordings. Firmware 0.3.1 and the updated Pi client also support
+an explicit fresh start, including recovery from `invalid_header`:
+
+```bash
+ros2 run hamr_bringup caster_recording --wheel front_left \
+  start trial_002 --discard-existing --duration 60
+```
+
+`--discard-existing` stops any old active run and deletes the selected boards'
+onboard logs without downloading them, then prepares and starts the new run.
+Use it on each start when previous onboard data is disposable. Saved host files
+remain intact, and a new run ID is required. All selected boards must first be
+flashed with firmware advertising `supports_discard_existing:true`; a client-only
+update cannot enable this on old firmware. Boot/reconnect never erases storage
+or starts a new recording.
 
 ### Live UDP recording
 

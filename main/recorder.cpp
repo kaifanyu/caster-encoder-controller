@@ -109,6 +109,7 @@ char* status_json() {
     cJSON_AddBoolToObject(object, "acknowledged", acknowledged);
     cJSON_AddBoolToObject(object, "diagnostics_known", diagnostics_known);
     cJSON_AddBoolToObject(object, "finalizing", stopping);
+    cJSON_AddBoolToObject(object, "supports_discard_existing", true);
     cJSON_AddNumberToObject(object, "http_port", kHttpPort);
     cJSON_AddNumberToObject(object, "sample_hz", SAMPLE_HZ);
     cJSON* diagnostics = cJSON_AddObjectToObject(object, "diagnostics");
@@ -178,6 +179,7 @@ void recover() {
         return;
     }
     if (pending_result != ESP_ERR_NVS_NOT_FOUND) {
+        journal_ready = false;
         state = State::error; std::strcpy(reason, "journal_read_error"); return;
     }
     auto* header = static_cast<uint8_t*>(malloc(kHeaderBytes));
@@ -245,10 +247,14 @@ void recover() {
     if (!identity_matches) { state = State::error; std::strcpy(reason, "identity_mismatch"); }
 }
 // Caller owns lock; no recording is active during erase/header construction.
-bool prepare(const char* requested) {
+bool prepare(const char* requested, bool discard_existing = false) {
     if (!partition || !journal_ready) return false;
+    // Even an explicit discard cannot race an acquisition or writer draining
+    // outside this lock. Stop and finish that recording before replacing it.
+    if (discard_existing && (state == State::recording || tracking.load() || stopping)) return false;
     if (run_id[0] && std::strcmp(requested, run_id) == 0) return header_valid;
-    if (state != State::idle && !acknowledged && !prepare_incomplete) return false;
+    if (state == State::recording || tracking.load() || stopping) return false;
+    if (!discard_existing && state != State::idle && !acknowledged && !prepare_incomplete) return false;
     suppress_live.store(true);
     if (nvs_set_str(prepare_journal, "prepare", requested) != ESP_OK ||
         nvs_commit(prepare_journal) != ESP_OK) {
@@ -397,8 +403,9 @@ esp_err_t conflict(httpd_req_t* request, const char* message) {
     return send_json(request, finish_json(object));
 }
 cJSON* request_json(httpd_req_t* request) {
-    if (request->content_len <= 0 || request->content_len >= 256) return nullptr;
-    char buffer[256];
+    // Two 64-character run IDs plus the explicit discard identity/boot guards.
+    if (request->content_len <= 0 || request->content_len >= 512) return nullptr;
+    char buffer[512];
     size_t used = 0;
     while (used < request->content_len) {
         const int got = httpd_req_recv(request, buffer + used, request->content_len - used);
@@ -424,13 +431,59 @@ esp_err_t command(httpd_req_t* request) {
     cJSON* body = request_json(request);
     if (!body) return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST, "run_id: 1..64 letters/digits/./-/_; first character alphanumeric");
     const char* id = cJSON_GetObjectItemCaseSensitive(body, "run_id")->valuestring;
+    const bool is_prepare = std::strcmp(request->uri, "/api/prepare") == 0;
+    const bool is_stop = std::strcmp(request->uri, "/api/stop") == 0;
+    const cJSON* discard = cJSON_GetObjectItemCaseSensitive(body, "discard_existing");
+    const cJSON* expected_device = cJSON_GetObjectItemCaseSensitive(body, "expected_device_id");
+    const cJSON* expected_boot = cJSON_GetObjectItemCaseSensitive(body, "expected_boot_id");
+    const cJSON* expected_run = cJSON_GetObjectItemCaseSensitive(body, "expected_run_id");
+    const bool discard_existing = cJSON_IsTrue(discard);
+    const bool guarded_stop = is_stop && (expected_device || expected_boot);
+    if (is_prepare && ((discard && !cJSON_IsBool(discard)) ||
+        (discard_existing && (!cJSON_IsString(expected_device) || !cJSON_IsString(expected_boot) ||
+            !(cJSON_IsNull(expected_run) ||
+              (cJSON_IsString(expected_run) && valid_run_id(expected_run->valuestring))))))) {
+        cJSON_Delete(body);
+        return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST,
+            "discard_existing must be boolean; true requires expected_device_id, expected_boot_id, expected_run_id (string or null)");
+    }
+    if (guarded_stop && (!cJSON_IsString(expected_device) || !cJSON_IsString(expected_boot))) {
+        cJSON_Delete(body);
+        return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST,
+            "guarded stop requires both expected_device_id and expected_boot_id strings");
+    }
     bool ok = false, wait_stop = false;
+    const char* conflict_message = "state/run/CRC conflict; unread recordings cannot be overwritten";
     {
         Guard guard;
-        if (std::strcmp(request->uri, "/api/prepare") == 0) ok = prepare(id);
+        if (is_prepare) {
+            const bool same_run = run_id[0] && std::strcmp(id, run_id) == 0;
+            // Device and boot must match even for a retry. Compare the previous
+            // run only for a replacement: an identical successful request still
+            // carries the old run guard and must never erase its new recording.
+            if (discard_existing &&
+                (std::strcmp(expected_device->valuestring, transport_device_id()) != 0 ||
+                 std::strcmp(expected_boot->valuestring, current_boot) != 0))
+                conflict_message = "discard identity/boot conflict; refresh status";
+            else if (discard_existing && !same_run &&
+                     (run_id[0] ? !cJSON_IsString(expected_run) || std::strcmp(expected_run->valuestring, run_id) != 0
+                                : !cJSON_IsNull(expected_run)))
+                conflict_message = "discard retained-run conflict; refresh status";
+            else {
+                ok = prepare(id, discard_existing);
+                if (discard_existing && !ok)
+                    conflict_message = "discard requires usable storage and an inactive recorder; stop and finalize before replacing";
+            }
+        }
         else if (std::strcmp(request->uri, "/api/start") == 0) ok = start(id);
-        else if (std::strcmp(request->uri, "/api/stop") == 0) {
-            if (header_valid && std::strcmp(run_id, id) == 0) {
+        else if (is_stop) {
+            // Guard the stop preceding a discard too: reassigned IPs or a
+            // reboot must not stop a different physical/current-boot session.
+            if (guarded_stop &&
+                (std::strcmp(expected_device->valuestring, transport_device_id()) != 0 ||
+                 std::strcmp(expected_boot->valuestring, current_boot) != 0))
+                conflict_message = "stop identity/boot conflict; refresh status";
+            else if (header_valid && std::strcmp(run_id, id) == 0) {
                 ok = state == State::stopped || state == State::error;
                 if (state == State::recording || state == State::prepared) {
                     request_stop(state == State::prepared ? "cancelled" : "requested",
@@ -456,7 +509,7 @@ esp_err_t command(httpd_req_t* request) {
         }
     }
     cJSON_Delete(body);
-    if (!ok) return conflict(request, "state/run/CRC conflict; unread recordings cannot be overwritten");
+    if (!ok) return conflict(request, conflict_message);
     if (wait_stop) {
         const int64_t deadline = esp_timer_get_time() + 30000000;
         while (true) {

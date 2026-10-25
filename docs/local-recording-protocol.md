@@ -5,6 +5,8 @@ stays connected for discovery, clock measurements, start/stop, and download.
 Each board samples independently into its own persistent flash log. From prepare
 through finalization, sample and periodic metadata UDP transmission is suppressed.
 Live UDP resumes after finalization. Booting never starts a recording.
+Firmware 0.3.1 adds explicitly requested, guarded discard of existing storage
+during preparation; ordinary preparation still protects unread recordings.
 
 The Pi must discover and verify the expected six physical devices, prepare all
 boards, measure their clocks, start all boards, and only then begin robot motion.
@@ -73,9 +75,9 @@ complete recording. Bad JSON receives 400; wrong run, state, or CRC receives 409
 | --- | --- |
 | `GET /api/status` | Current identity plus retained recording status. |
 | `GET /api/sync` | Current identity, `boot_id`, `rx_us`, and `tx_us`. Timestamps are local microseconds near handler receipt and reply construction. |
-| `POST /api/prepare` | `{"run_id":"..."}`. Erases only idle storage or a previously acknowledged recording. Repeating the current run ID returns its existing status without erasing. |
+| `POST /api/prepare` | `{"run_id":"..."}`. Normally erases only idle storage, an interrupted preparation, or a previously acknowledged recording. Optional `discard_existing:true` with the identity/boot/run guards below permits replacing inactive unread or invalid contents. Repeating the current run ID never erases it. |
 | `POST /api/start` | `{"run_id":"..."}`. Starts a prepared run in this boot. A retry never changes its original start time. A terminal run with that ID is returned as terminal, never restarted. |
-| `POST /api/stop` | `{"run_id":"..."}`. Captures the stop boundary, waits for the acquisition barrier and writer drain, then returns final status. Stopping a prepared run cancels it. Terminal retries are safe. Finalization timeout returns 500; retry stop/status. |
+| `POST /api/stop` | `{"run_id":"..."}`. Captures the stop boundary, waits for the acquisition barrier and writer drain, then returns final status. Optional `expected_device_id` and `expected_boot_id` guards must both be strings and match current identity before stopping. Stopping a prepared run cancels it. Terminal retries are safe. Finalization timeout returns 500; retry stop/status. |
 | `GET /api/log?run_id=...` | Binary header plus exactly the finalized valid records. Allowed for stopped/error logs with a valid header and no finalization in progress. The response uses HTTP chunked transfer; restart the download from byte zero on failure. |
 | `POST /api/ack` | `{"run_id":"...","crc32":123}`. Verifies the finalized record CRC and persistently marks the log reusable. The Pi must first verify the entire file and durably save it. Does not immediately erase the log. Retries are safe. |
 
@@ -83,6 +85,46 @@ Download and command handlers execute serially in the HTTP server. A prepare
 cannot replace a log halfway through its download. Discovery is a separate task.
 The stop handler allows up to 30 seconds for finalization; use a longer client
 request timeout. Prepare may also take seconds due to flash erasure.
+
+### Explicit discard before a new run
+
+Firmware 0.3.1 advertises `supports_discard_existing:true` in status. A client
+must check this capability before relying on discard: older firmware ignores
+unknown fields. Discard permanently removes the previous on-board log; it does
+not remove already downloaded host files. It is an option on prepare, not an
+automatic boot action or a persistent firmware setting.
+
+Read each board's current status, then send a fresh run ID with these guards:
+
+```json
+{"run_id":"trial_002","discard_existing":true,"expected_device_id":"aa:bb:cc:dd:ee:01","expected_boot_id":"0123456789abcdef","expected_run_id":null}
+```
+
+Use the exact current `device_id`, `boot_id`, and `run_id` from status. The example
+uses JSON null for an unidentified invalid header; for a retained run, use its
+string ID. All three guard fields are required when discard is true, and
+`discard_existing` must be a JSON boolean. Missing or incorrectly typed fields
+receive 400. A mismatched device, boot, or retained run receives 409 with no erase.
+Requests are bounded to less than 512 bytes, including both maximum-length run IDs.
+
+Discard can replace prepared, stopped/unacknowledged, or inactive error contents,
+including `invalid_header`, when the partition and preparation journal are usable.
+It refuses an active recording, ongoing acquisition, or finalization. For an
+active old run, first issue `/api/stop` for that run with `expected_device_id` and
+`expected_boot_id` from current status, wait for finalization, then refresh status
+before preparing the replacement. Guarded stop requires both fields as strings
+(400 otherwise) and checks them before capturing the stop boundary (409 on a
+mismatch). Stop requests without either guard retain their original behavior.
+The `supports_discard_existing` capability includes these stop guards. This
+discard workflow does not require downloading or acknowledging the old log.
+
+An exact retry for the current run ID never erases it, even if the request still
+contains the previous run ID in `expected_run_id`; current physical device and
+boot guards must still match. A terminal/error run with that ID is returned as
+terminal/error, never restarted. Active/finalizing discard requests still receive
+409. Use a fresh run ID for a new recording. Preparation interrupted before a
+valid ready header is committed retains the existing NVS-journal recovery path:
+it may be prepared again because acquisition could not have started.
 
 ## Status and clock meaning
 
@@ -110,6 +152,8 @@ All status responses include:
 - `acknowledged`: durable permission to reuse the storage for a different run ID.
 - `finalizing`: stop requested but queue/barrier/footer not yet complete. This
   remains `state: "recording"` while draining an active run.
+- `supports_discard_existing`: true on firmware supporting the guarded explicit
+  discard option on prepare; absent on earlier firmware.
 - `diagnostics`: final boot-cumulative snapshots of `acquisition_overruns`,
   `queue_drops`, `invalid_spi_responses`, `index_queue_drops`, and `radio_failures`.
   In nonterminal states these are the current boot counters. They include events
@@ -198,7 +242,8 @@ and cleared only after the new header/readiness marker succeeds, before start ca
 be accepted. A pending intent at boot proves that the replacement never reached
 recording, so firmware returns idle with `prepare_interrupted` and permits a fresh
 prepare. It does not erase automatically. An unknown corrupted header without this
-proof remains protected in `error`; do not erase it merely to clear the error.
+proof remains protected in `error`. Recover/download it when needed; if its
+contents may be discarded, use the guarded explicit-discard preparation above.
 
 RAM-queued samples at power loss cannot be recovered. CENTER can establish a new
 single-run unwrapped segment after prepare; it cannot recover turns across power
@@ -219,6 +264,11 @@ deterministic flash, RTOS, and HTTP substitutes. Its Python runner uses the pinn
 ESP-IDF cJSON source through `CJSON_SOURCE_DIRECTORY`. Tests exercise the binary
 CRC/endianness, handlers, idempotency, stop/acquisition barrier, durable ACK gates,
 reboot identity, torn writes, corruption-prefix recovery, interrupted prepare,
-capacity, and queue overflow. These tests do not simulate hardware flash timing,
+capacity, and queue overflow. Guarded-discard tests exercise HTTP recovery from
+invalid headers and unread logs, strict types and identity/boot/run guards,
+active/finalizing rejection, identity/boot guards on the preceding stop,
+maximum-length IDs, idempotent retries, and journal
+failures/torn replacement writes with no automatic boot erasure.
+These tests do not simulate hardware flash timing,
 Wi-Fi latency, battery failure timing, or encoder signals. Those require bench
 validation before relying on a trajectory's timing accuracy.

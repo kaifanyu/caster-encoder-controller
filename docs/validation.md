@@ -1,5 +1,26 @@
 # Validation record
 
+## Explicit storage discard, firmware 0.3.1 (2026-10-25)
+
+- `CJSON_SOURCE_DIRECTORY=/tmp/hamr-cjson-8f2beb57 ./scripts/test.sh` passed
+  encoder-math assertions and all 36 Python tests, including compilation of the
+  actual recorder and all six protocol profiles. cJSON source matches ESP-IDF
+  v5.4.2's submodule commit `8f2beb57ddad1f94bed899790b00f46df893ccac`.
+- Native recorder tests cover recovery from `invalid_header`, explicit deletion
+  of unread/prepared contents, omitted/false/mistyped flags, required guard types,
+  device/boot/retained-run conflicts, active/acquiring/finalizing refusal, maximum
+  run IDs, same-run retry preservation (including terminal errors and reboots),
+  and failed journal commits/torn replacement headers with no erasure on reboot.
+- Guarded stop tests confirm that wrong device/boot or malformed guard fields
+  cannot stop an active run, matching guards stop and drain it, and legacy stops
+  without guards retain their existing behavior.
+- The preparation journal test substitute now models staged versus committed
+  intent, so failure to commit an intent preserves the original log and failure
+  to clear an intent preserves the interrupted-preparation recovery path.
+
+These are native software checks. No ESP-IDF target build, device flashing,
+network mutation, or hardware flash erase was performed for this change.
+
 ## Commanded local recording, firmware 0.3.0 (2026-10-24)
 
 - Final front-left CENTER application built and linked successfully with the

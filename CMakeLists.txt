@@ -27,7 +27,7 @@ endif()
 # The driver's signed 32-bit accumulator must wrap predictably; the application
 # extends modular differences into int64_t without clearing the running counter.
 add_compile_options(-fwrapv)
-set(PROJECT_VER "0.3.0")
+set(PROJECT_VER "0.3.1")
 # Existing per-profile sdkconfig files retain selected Kconfig values over new
 # defaults. Migrate only partition-table keys so every normal build/flash includes
 # the new log partition. This edits build configuration, never device flash.
