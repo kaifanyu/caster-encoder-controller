@@ -131,7 +131,9 @@ char* serialize_metadata(const char* boot_id, const char* device_id, const Encod
     number(root, "readiness_delay_ms", 250);
     cJSON_AddStringToObject(root, "index_edge", "rising");
     cJSON_AddStringToObject(root, "index_timing", "GPIO ISR observation; latency not bench measured");
-    cJSON_AddStringToObject(root, "storage", "host_only; bounded volatile queue; no outage backfill");
+    cJSON_AddStringToObject(root, "storage", "explicit local flash runs; HTTP verified download; UDP live outside runs");
+    cJSON_AddNumberToObject(root, "recorder_http_port", 8080);
+    cJSON_AddNumberToObject(root, "recorder_discovery_port", 5010);
     cJSON_AddStringToObject(root, "gpio", c.role == 3 ? "CS=21,SCLK=19,MISO=20,MOSI=18" : "A=0,B=1,Z=2");
     return finish(root);
 }

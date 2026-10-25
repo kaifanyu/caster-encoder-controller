@@ -18,7 +18,7 @@ Run the two logger commands in separate terminals, or use the Pi ROS bridges and
 - `stats.json`: receive totals and separate sequence accounting for each `(wheel_id, device_id, node_id, boot_id)`, replaced once per second and at clean exit. `invalid_packets` counts malformed or conflicting datagrams; `identity_conflicts` identifies assignment conflicts and `filtered_packets` counts traffic excluded by `--wheel`.
 - `clock-map.json`: the supplied clock map, if one was requested.
 
-Files flush once per second and on clean exit. This is host storage, not persistent storage on the controllers; a finite node queue cannot preserve an unlimited radio outage. Keep the host logger running for the recording.
+Files flush once per second and on clean exit. This standalone logger uses host storage and live UDP; a finite telemetry queue cannot preserve a radio outage. For commanded onboard recording and verified download after stopping, use the separate [local recording protocol](local-recording-protocol.md) and the companion Pi `caster_recording` command. Live sample UDP is suppressed while that recorder is prepared or recording.
 
 ## Version 2 identity and legacy version 1
 

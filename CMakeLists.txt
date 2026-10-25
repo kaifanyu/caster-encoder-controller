@@ -27,7 +27,30 @@ endif()
 # The driver's signed 32-bit accumulator must wrap predictably; the application
 # extends modular differences into int64_t without clearing the running counter.
 add_compile_options(-fwrapv)
-set(PROJECT_VER "0.2.1")
+set(PROJECT_VER "0.3.0")
+# Existing per-profile sdkconfig files retain selected Kconfig values over new
+# defaults. Migrate only partition-table keys so every normal build/flash includes
+# the new log partition. This edits build configuration, never device flash.
+if(DEFINED SDKCONFIG)
+    set(_caster_sdkconfig "${SDKCONFIG}")
+else()
+    set(_caster_sdkconfig "${CMAKE_CURRENT_SOURCE_DIR}/sdkconfig")
+endif()
+if(EXISTS "${_caster_sdkconfig}")
+    file(READ "${_caster_sdkconfig}" _caster_config_old)
+    set(_caster_config_new "${_caster_config_old}")
+    foreach(_choice SINGLE_APP SINGLE_APP_LARGE TWO_OTA TWO_OTA_LARGE)
+        string(REPLACE "CONFIG_PARTITION_TABLE_${_choice}=y"
+            "# CONFIG_PARTITION_TABLE_${_choice} is not set" _caster_config_new "${_caster_config_new}")
+    endforeach()
+    string(REPLACE "# CONFIG_PARTITION_TABLE_CUSTOM is not set"
+        "CONFIG_PARTITION_TABLE_CUSTOM=y" _caster_config_new "${_caster_config_new}")
+    string(REGEX REPLACE "CONFIG_PARTITION_TABLE_(CUSTOM_FILENAME|FILENAME)=\"[^\"]*\""
+        "CONFIG_PARTITION_TABLE_\\1=\"partitions.csv\"" _caster_config_new "${_caster_config_new}")
+    if(NOT _caster_config_new STREQUAL _caster_config_old)
+        file(WRITE "${_caster_sdkconfig}" "${_caster_config_new}")
+    endif()
+endif()
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(hamr_caster_encoders)
 if(NOT "${IDF_VERSION_MAJOR}.${IDF_VERSION_MINOR}.${IDF_VERSION_PATCH}" VERSION_EQUAL "5.4.2")

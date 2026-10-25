@@ -1,6 +1,6 @@
 # HAMR caster encoders
 
-One ESP-IDF project runs on six **Seeed XIAO ESP32-C6** boards: H1, H2, and CENTER on each of the **front-left** and **front-right** wheels. Each board reads its own encoder, calculates angle and angular velocity, and sends timestamped samples over Wi-Fi. A Python logger saves the measurements on your computer as JSONL and CSV.
+One ESP-IDF project runs on six **Seeed XIAO ESP32-C6** boards: H1, H2, and CENTER on each of the **front-left** and **front-right** wheels. Each board reads its own encoder and calculates angle and angular velocity. The Pi can command local flash recording over Wi-Fi and download the verified history after stopping. Live UDP telemetry and the standalone Python logger remain available outside local recording.
 
 | Firmware role | Hardware | Measurement |
 |---|---|---|
@@ -149,6 +149,34 @@ serial device is connected.
 
 ## 4. Record measurements
 
+### Commanded local recording
+
+Use the companion `hamr_control` Pi commands to record only when requested:
+
+```bash
+ros2 run hamr_bringup caster_recording discover
+ros2 run hamr_bringup caster_recording start trial_001 --duration 60
+# Run the trajectory after start succeeds on all six boards.
+ros2 run hamr_bringup caster_recording stop trial_001
+```
+
+`stop` downloads and verifies the logs into
+`$HAMR_BAG_ROOT/encoder_trial_001/` (the existing Pi rosbag root by default),
+then acknowledges each durable download. `fetch trial_001` retries transfer.
+`--duration` is a capacity check, not an automatic stop. Firmware must be updated
+with the new partition table as well as the application on all selected boards.
+Wi-Fi remains connected for commands; live sample transmission is suppressed
+during preparation and recording. Acquisition timestamps and pre/post clock
+exchanges are preserved for offline alignment. At the default 200 Hz, the full
+record format holds 153.6 seconds on the current 4 MiB partition layout.
+
+See the [operator workflow](../hamr_control/docs/LOCAL_CASTER_RECORDING.md) and
+[storage/control protocol](docs/local-recording-protocol.md) for setup, recovery,
+capacity limits, and acquisition qualification. Start never overwrites an
+unacknowledged recording, and boot/reconnect never starts a new recording.
+
+### Live UDP recording
+
 For normal Pi operation use the companion `hamr_control` bridge and recorder. Its wheel configuration must match these UDP ports and the six device IDs. ROS topics are under `/caster_encoder/front_left/` and `/caster_encoder/front_right/`; each has `packets`, `metadata`, `diagnostics`, and `H1`, `H2`, `CENTER` `joint_states` topics. The rosbag records both branches separately in one bag.
 
 For a standalone non-ROS bench recording, use Python 3.8 or newer with no pip packages. Start these in two terminals:
@@ -214,7 +242,7 @@ Move each labeled encoder slowly and confirm its wheel and role. Stop with **Ctr
 
 The standalone logger locks each wheel/role to its first observed device for that run, and rejects a second device claiming that slot or the same device changing slots. A device reboot creates a separate boot stream. The Pi's explicit device inventory additionally checks assignment from the first packet; always fill it for a physical experiment.
 
-Recordings are ignored by Git. See [the protocol notes](docs/protocol.md) for fields, flags, and measured clock mappings. The ESP32 keeps a bounded in-memory queue; wireless outages can lose samples and there is no outage replay or persistent controller storage. Sequence and diagnostic counters expose losses; UDP provides no delivery guarantee.
+Recordings are ignored by Git. See [the protocol notes](docs/protocol.md) for fields, flags, and measured clock mappings. Live UDP uses a bounded in-memory queue and cannot backfill lost packets. Commanded local recording instead retains its flash log through network outages and transfers it after stopping. Sequence and diagnostic counters expose acquisition losses; UDP itself provides no delivery guarantee.
 
 ## 5. Understand the measurements
 

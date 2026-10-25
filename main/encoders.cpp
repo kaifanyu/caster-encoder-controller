@@ -225,6 +225,13 @@ void encoder_init(const EncoderConfig& settings) {
     else init_quadrature();
 }
 
+void encoder_begin_recording_segment() {
+    absolute_tracker = math::AbsoluteTracker{};
+    previous_sample_valid = false;
+    previous_sample_time = 0;
+    filtered_velocity = missing_value;
+}
+
 Reading encoder_read() {
     Reading result;
     result.flags = READY;

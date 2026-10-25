@@ -1,5 +1,6 @@
 #include "config.h"
 #include "telemetry.h"
+#include "recorder.h"
 #include "driver/gpio.h"
 #include "esp_log.h"
 #include "esp_random.h"
@@ -19,6 +20,7 @@ TaskHandle_t acquisition_task;
 caster::Diagnostics diagnostics;
 char boot_id[17];
 int reset_reason;
+std::atomic<bool> local_segment_started{false};
 
 void timer_callback(void*) { xTaskNotifyGive(acquisition_task); }
 
@@ -31,6 +33,10 @@ void acquire(void*) {
         // Missed timer notifications correspond to skipped acquisition slots.
         sequence += pending - 1;
         sample.sequence = sequence++;
+        if (caster::recorder_new_segment()) {
+            caster::encoder_begin_recording_segment();
+            local_segment_started.store(true);
+        }
         sample.reading = caster::encoder_read();
         const int64_t interval = sample.reading.timestamp_us - previous_us;
         if (pending > 1 || (previous_us != 0 && interval > 1500000 / SAMPLE_HZ)) {
@@ -40,7 +46,8 @@ void acquire(void*) {
         previous_us = sample.reading.timestamp_us;
         diagnostics.invalid_spi_responses.store(sample.reading.invalid_spi_responses);
         diagnostics.index_queue_drops.store(sample.reading.index_queue_drops);
-        if (xQueueSend(samples_queue, &sample, 0) != pdTRUE)
+        caster::recorder_capture(sample);
+        if (!caster::recorder_suppress_live() && xQueueSend(samples_queue, &sample, 0) != pdTRUE)
             diagnostics.queue_drops.fetch_add(1);
     }
 }
@@ -57,17 +64,27 @@ void transmit(void*) {
         caster::Sample batch[2];
         int count = 0;
         while (count < 2 && xQueueReceive(samples_queue, &batch[count], 0) == pdTRUE) ++count;
+        // Local logs explicitly identify their new run-scoped CENTER origin.
+        // Legacy live UDP has only boot identity, so it must not claim continuity
+        // through that reset. Preserve wrapped phase and local velocity instead.
+        if (CASTER_NODE_ID == 3 && local_segment_started.load()) {
+            for (int i = 0; i < count; ++i) {
+                batch[i].reading.angle_rad = caster::missing_value;
+                batch[i].reading.flags &= ~caster::UNWRAP_CONTINUOUS;
+                batch[i].reading.flags |= caster::CONTINUITY_LOST;
+            }
+        }
         for (int i = 0; i < count && !center_loss_reported; ++i) {
             const auto& loss = batch[i].reading.continuity_loss;
             if (CASTER_NODE_ID == 3 && loss.reason != caster::math::AbsoluteLossReason::none) {
                 ESP_LOGW(TAG, "CENTER unwrapped angle unavailable: reason=%s gap_us=%" PRId64
-                         " wrapped_delta_bins=%d max_rpm=%.3f; first loss retained until reboot",
+                         " wrapped_delta_bins=%d max_rpm=%.3f; loss retained until next recording segment/reboot",
                          caster::math::absolute_loss_reason_name(loss.reason),
                          loss.interval_us, loss.delta_bins, config.max_rpm);
                 center_loss_reported = true;
             }
         }
-        if (count) {
+        if (count && !caster::recorder_suppress_live()) {
             char* data = caster::serialize_samples(boot_id, caster::transport_device_id(), batch, count, diagnostics);
             if (!caster::transport_send(data)) diagnostics.radio_failures.fetch_add(1);
             free(data);
@@ -77,13 +94,13 @@ void transmit(void*) {
             caster::transport_reconnect();
             last_reconnect = now;
         }
-        if (now - last_metadata >= 2000000) {
+        if (now - last_metadata >= 2000000 && !caster::recorder_suppress_live()) {
             char* data = caster::serialize_metadata(boot_id, caster::transport_device_id(), config, reset_reason);
             if (!caster::transport_send(data)) diagnostics.radio_failures.fetch_add(1);
             free(data);
             last_metadata = now;
         }
-        if (now - last_debug >= 1000000) {
+        if (now - last_debug >= 100000) {
             ESP_LOGI(TAG, "wifi=%s overruns=%" PRIu32 " queue_drops=%" PRIu32
                      " spi_invalid=%" PRIu32 " radio_failures=%" PRIu32,
                      caster::transport_connected() ? "up" : "down",
@@ -146,6 +163,7 @@ extern "C" void app_main() {
     ESP_LOGI(TAG, "wheel=%s role=%s device_id=%s boot_id=%s UDP receiver=%s:%d sample=%dHz transmit=%dHz clock_sync=INVALID",
              caster::kWheel, caster::kRole, caster::transport_device_id(), boot_id, RECEIVER_IPV4, UDP_PORT, SAMPLE_HZ, TRANSMIT_HZ);
     caster::encoder_init(config);
+    caster::recorder_init(boot_id, reset_reason, &diagnostics);
     samples_queue = xQueueCreate(64, sizeof(caster::Sample));
     ESP_ERROR_CHECK(samples_queue ? ESP_OK : ESP_ERR_NO_MEM);
     ESP_ERROR_CHECK(xTaskCreate(acquire, "acquisition", 6144, nullptr, 12, &acquisition_task) == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);

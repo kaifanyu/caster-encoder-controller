@@ -116,7 +116,8 @@ struct AbsoluteContinuityLoss {
 
 // A verified *physical* speed bound is required to distinguish turns. Once a
 // gap/rate violation makes integration ambiguous, continuity stays lost for
-// this boot; valid single-turn phase remains usable independently.
+// this tracker segment; valid single-turn phase remains usable independently.
+// Starting a recording explicitly constructs a new segment after flash erasure.
 class AbsoluteTracker {
 public:
     AbsoluteStep update(int position, int64_t timestamp_us, double max_rpm,

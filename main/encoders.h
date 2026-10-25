@@ -63,5 +63,8 @@ struct Reading {
 void encoder_init(const EncoderConfig& config);
 // A single acquisition task owns reads; index GPIO interrupts run independently.
 Reading encoder_read();
+// Acquisition owner only: a fresh CENTER unwrap/velocity segment after prepare
+// erasure. The PCNT cumulative count and hardware/index interrupts keep running.
+void encoder_begin_recording_segment();
 
 }  // namespace caster

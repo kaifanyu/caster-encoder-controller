@@ -1,5 +1,36 @@
 # Validation record
 
+## Commanded local recording, firmware 0.3.0 (2026-10-24)
+
+- Final front-left CENTER application built and linked successfully with the
+  pinned ESP-IDF v5.4.2 toolchain. Binary size is `0xea9a0` bytes, within the
+  unchanged 1 MiB application partition. The generated partition table includes
+  the `caster_log` partition with capacity for 30,720 full sample records.
+- Compiler checks exercised the firmware translation units for all six
+  wheel/role profiles. The right-wheel checks used its example header because
+  this checkout does not currently contain `config/front_right.local.h`.
+- Native encoder-math assertions and actual cJSON protocol serialization tests
+  passed. New tests compile the real recorder implementation against deterministic
+  SDK/flash substitutes and exercise capture boundaries, idempotent commands,
+  capacity/overflow, corrupt/torn writes, preparation interruption, reboot
+  recovery, unread-log protection, and download acknowledgement.
+- The companion Pi/analyzer regression run passed 197 tests, with 11 existing
+  environment-dependent skips. After adding acquisition-window validation, the
+  final focused recorder-format/client run passed all 75 tests. These include
+  loopback HTTP downloads, partial failure/retry, identity mismatches, clock
+  drift/steps/reboots, corrupted downloads, and durable files before ACK.
+- An isolated ament CMake installation under WSL with ROS Humble succeeded;
+  `ros2 run hamr_bringup caster_recording --help` resolved the installed modules
+  and configuration. No discovery or physical recording was started.
+
+These are software checks. The six boards were not flashed or exercised as part
+of this implementation. Actual flash-write acquisition intervals, Wi-Fi start/
+stop behavior, power-loss recovery, and clock-estimate accuracy still require
+bench qualification. The original private configuration and the user's serial
+debug interval were preserved. See [the operator guide](../../hamr_control/docs/LOCAL_CASTER_RECORDING.md).
+
+## Earlier firmware 0.2.1 validation
+
 Software checks run on 2026-10-24. Firmware version: `0.2.1`, telemetry version: `2`.
 
 Upstream `origin/main` was fast-forwarded from `58381b3` through `4ca21ea` to

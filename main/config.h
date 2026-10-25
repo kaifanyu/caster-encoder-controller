@@ -27,7 +27,7 @@ static_assert(1000000 % SAMPLE_HZ == 0 && 1000 % TRANSMIT_HZ == 0,
 static_assert(UDP_PORT > 0 && UDP_PORT <= 65535, "Invalid UDP port");
 
 namespace caster {
-constexpr const char* kFirmwareVersion = "0.2.1";
+constexpr const char* kFirmwareVersion = "0.3.0";
 constexpr const char* kWheel = CASTER_WHEEL_ID;
 constexpr const char* kLocalIpv4 = CASTER_NODE_ID == 1 ? H1_IPV4 : CASTER_NODE_ID == 2 ? H2_IPV4 : CENTER_IPV4;
 constexpr const char* kRole = CASTER_NODE_ID == 1 ? "H1" : CASTER_NODE_ID == 2 ? "H2" : "CENTER";
