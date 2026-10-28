@@ -7,4 +7,5 @@ cd "$repo_dir"
 "${CXX:-g++}" -std=c++17 -Wall -Wextra -Werror -I main \
     tests/test_encoder_math.cpp -o "$test_binary"
 "$test_binary"
+python3 -m unittest discover -s ordinary_caster/tests -p 'test_*.py'
 python3 -m unittest discover -s tests -p 'test_*.py'

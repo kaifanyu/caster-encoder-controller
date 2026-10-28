@@ -12,6 +12,18 @@ CJSON = os.environ.get("CJSON_SOURCE_DIRECTORY")
 @unittest.skipUnless(CJSON, "set CJSON_SOURCE_DIRECTORY to pinned ESP-IDF cJSON for recorder lifecycle tests")
 class RecorderStorageTests(unittest.TestCase):
     def test_firmware_state_machine_and_torn_flash_recovery(self):
+        self._run_profile(1, REPO / "config")
+
+    def test_ordinary_dual_channel_storage_and_recovery(self):
+        self._run_profile(4, REPO / "ordinary_caster" / "config")
+
+    def test_separate_swivel_board_storage_and_recovery(self):
+        self._run_profile(5, REPO / "ordinary_caster" / "config")
+
+    def test_separate_wheel_board_storage_and_recovery(self):
+        self._run_profile(6, REPO / "ordinary_caster" / "config")
+
+    def _run_profile(self, node, config):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             cjson = Path(CJSON)
@@ -21,8 +33,8 @@ class RecorderStorageTests(unittest.TestCase):
             binary = root / ("recorder.exe" if os.name == "nt" else "recorder")
             command = ["g++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
                        "-I", str(REPO / "tests" / "recorder_stubs"), "-I", str(REPO / "main"),
-                       "-I", str(REPO / "config"), "-I", str(cjson),
-                       "-DCASTER_NODE_ID=1", "-DCASTER_WHEEL_INDEX=1",
+                       "-I", str(config), "-I", str(cjson),
+                       f"-DCASTER_NODE_ID={node}", "-DCASTER_WHEEL_INDEX=1",
                        '-DCASTER_CONFIG_HEADER="front_left.example.h"',
                        str(REPO / "tests" / "test_recorder_storage.cpp"), str(object_file), "-o", str(binary)]
             compiled = subprocess.run(command, capture_output=True, text=True)

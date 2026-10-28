@@ -8,14 +8,21 @@
 // Portable, explicitly little-endian storage format. Never persist C++ structs.
 namespace caster::recording {
 constexpr size_t kHeaderBytes = 4096;
+#if CASTER_NODE_ID >= 4
+constexpr size_t kRecordBytes = 116;
+constexpr const char* kMagic = "CASTLOG2";
+constexpr uint32_t kVersion = 2;
+#else
 constexpr size_t kRecordBytes = 100;
+constexpr const char* kMagic = "CASTLOG1";
+constexpr uint32_t kVersion = 1;
+#endif
 constexpr size_t kFooterBytes = 4096;
 constexpr size_t kControlBytes = 128;
 constexpr size_t kStartOffset = 0;
 constexpr size_t kStopOffset = 256;
 constexpr size_t kAckOffset = 512;
 constexpr size_t kReadyOffset = 768;
-constexpr uint32_t kVersion = 1;
 
 inline uint32_t crc32(const void* data, size_t length, uint32_t previous = 0) {
     uint32_t crc = ~previous;
@@ -45,6 +52,23 @@ inline void encode_record(const Sample& sample, uint8_t* out) {
     const auto& r = sample.reading;
     put(out, sample.sequence, 8);
     put(out + 8, static_cast<uint64_t>(r.timestamp_us), 8);
+#if CASTER_NODE_ID >= 4
+    put(out + 16, static_cast<uint64_t>(r.wheel.timestamp_us), 8);
+    put(out + 24, static_cast<uint64_t>(r.wheel.raw_count), 8);
+    put(out + 32, r.raw_spi_word, 2);
+    put(out + 34, static_cast<uint16_t>(r.position12), 2);
+    put(out + 36, r.flags, 4);
+    put(out + 40, r.wheel.flags, 4);
+    put(out + 44, 0, 4);
+    put_double(out + 48, r.absolute_angle_rad);
+    put_double(out + 56, r.calibrated_alpha_rad);
+    put_double(out + 64, r.angle_rad);
+    put_double(out + 72, r.velocity_rad_s);
+    put_double(out + 80, r.filtered_velocity_rad_s);
+    put_double(out + 88, r.wheel.angle_rad);
+    put_double(out + 96, r.wheel.velocity_rad_s);
+    put_double(out + 104, r.wheel.filtered_velocity_rad_s);
+#else
     put(out + 16, static_cast<uint64_t>(r.raw_count), 8);
     put(out + 24, r.raw_spi_word, 2);
     put(out + 26, static_cast<uint16_t>(r.position14), 2);
@@ -57,10 +81,14 @@ inline void encode_record(const Sample& sample, uint8_t* out) {
     put(out + 72, r.index_event_count, 8);
     put(out + 80, static_cast<uint64_t>(r.index_timestamp_us), 8);
     put(out + 88, static_cast<uint64_t>(r.index_raw_count), 8);
-    put(out + 96, crc32(out, 96), 4);
+#endif
+    put(out + kRecordBytes - 4, crc32(out, kRecordBytes - 4), 4);
 }
 inline bool valid_record(const uint8_t* record) {
-    return get(record + 96, 4) == crc32(record, 96) &&
+    return get(record + kRecordBytes - 4, 4) == crc32(record, kRecordBytes - 4) &&
+#if CASTER_NODE_ID >= 4
+           get(record + 16, 8) <= INT64_MAX && get(record + 44, 4) == 0 &&
+#endif
            get(record + 8, 8) <= INT64_MAX;
 }
 inline bool erased(const uint8_t* data, size_t size) {

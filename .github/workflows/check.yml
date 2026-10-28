@@ -19,7 +19,18 @@ jobs:
         wheel: [front_left, front_right]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - run: cp "config/${{ matrix.wheel }}.example.h" "config/${{ matrix.wheel }}.local.h"
+      - run: cp "ball_caster/config/${{ matrix.wheel }}.example.h" "ball_caster/config/${{ matrix.wheel }}.local.h"
       - run: ./scripts/idf.sh "${{ matrix.wheel }}" "${{ matrix.role }}" build
       - if: matrix.wheel == 'front_left' && matrix.role == 'H1'
         run: ./scripts/test_protocol.sh
+
+  ordinary-firmware:
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        wheel: [front_left, front_right]
+        role: [SWIVEL, WHEEL, ORDINARY]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - run: cp "ordinary_caster/config/${{ matrix.wheel }}.example.h" "ordinary_caster/config/${{ matrix.wheel }}.local.h"
+      - run: bash ./ordinary_caster/idf.sh "${{ matrix.wheel }}" "${{ matrix.role }}" build

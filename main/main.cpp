@@ -41,7 +41,8 @@ void acquire(void*) {
         const int64_t interval = sample.reading.timestamp_us - previous_us;
         if (pending > 1 || (previous_us != 0 && interval > 1500000 / SAMPLE_HZ)) {
             diagnostics.acquisition_overruns.fetch_add(pending > 1 ? pending - 1 : 1);
-            sample.reading.flags |= caster::ACQUISITION_OVERRUN;
+            if (CASTER_NODE_ID != 6) sample.reading.flags |= caster::ACQUISITION_OVERRUN;
+            if (CASTER_NODE_ID == 4 || CASTER_NODE_ID == 6) sample.reading.wheel.flags |= caster::ACQUISITION_OVERRUN;
         }
         previous_us = sample.reading.timestamp_us;
         diagnostics.invalid_spi_responses.store(sample.reading.invalid_spi_responses);
@@ -64,10 +65,10 @@ void transmit(void*) {
         caster::Sample batch[2];
         int count = 0;
         while (count < 2 && xQueueReceive(samples_queue, &batch[count], 0) == pdTRUE) ++count;
-        // Local logs explicitly identify their new run-scoped CENTER origin.
-        // Legacy live UDP has only boot identity, so it must not claim continuity
+        // Local logs identify their new run-scoped CENTER/swivel origin.
+        // Live UDP has only boot identity, so it must not claim continuity
         // through that reset. Preserve wrapped phase and local velocity instead.
-        if (CASTER_NODE_ID == 3 && local_segment_started.load()) {
+        if ((CASTER_NODE_ID == 3 || CASTER_NODE_ID == 4 || CASTER_NODE_ID == 5) && local_segment_started.load()) {
             for (int i = 0; i < count; ++i) {
                 batch[i].reading.angle_rad = caster::missing_value;
                 batch[i].reading.flags &= ~caster::UNWRAP_CONTINUOUS;
@@ -76,18 +77,29 @@ void transmit(void*) {
         }
         for (int i = 0; i < count && !center_loss_reported; ++i) {
             const auto& loss = batch[i].reading.continuity_loss;
-            if (CASTER_NODE_ID == 3 && loss.reason != caster::math::AbsoluteLossReason::none) {
-                ESP_LOGW(TAG, "CENTER unwrapped angle unavailable: reason=%s gap_us=%" PRId64
+            if ((CASTER_NODE_ID == 3 || CASTER_NODE_ID == 4 || CASTER_NODE_ID == 5) && loss.reason != caster::math::AbsoluteLossReason::none) {
+                ESP_LOGW(TAG, "%s unwrapped angle unavailable: reason=%s gap_us=%" PRId64
                          " wrapped_delta_bins=%d max_rpm=%.3f; loss retained until next recording segment/reboot",
+                         CASTER_NODE_ID >= 4 ? "SWIVEL" : "CENTER",
                          caster::math::absolute_loss_reason_name(loss.reason),
                          loss.interval_us, loss.delta_bins, config.max_rpm);
                 center_loss_reported = true;
             }
         }
         if (count && !caster::recorder_suppress_live()) {
+#if CASTER_NODE_ID >= 4
+            // A dual-channel record is larger. Keep every UDP datagram below
+            // the usual IPv4 MTU rather than relying on IP fragmentation.
+            for (int i = 0; i < count; ++i) {
+                char* data = caster::serialize_samples(boot_id, caster::transport_device_id(), &batch[i], 1, diagnostics);
+                if (!caster::transport_send(data)) diagnostics.radio_failures.fetch_add(1);
+                free(data);
+            }
+#else
             char* data = caster::serialize_samples(boot_id, caster::transport_device_id(), batch, count, diagnostics);
             if (!caster::transport_send(data)) diagnostics.radio_failures.fetch_add(1);
             free(data);
+#endif
         }
         const int64_t now = esp_timer_get_time();
         if (now - last_reconnect >= 2000000) {
@@ -108,7 +120,19 @@ void transmit(void*) {
                      diagnostics.invalid_spi_responses.load(), diagnostics.radio_failures.load());
             if (count) {
                 const auto& r = batch[count - 1].reading;
-                if (CASTER_NODE_ID == 3) {
+                if (CASTER_NODE_ID == 5) {
+                    ESP_LOGI(TAG, "seq=%" PRIu64 " swivel_spi=0x%04x swivel_pos=%d swivel_rad=%.6f swivel_vel=%.6f flags=0x%04" PRIx32,
+                             batch[count - 1].sequence, static_cast<unsigned>(r.raw_spi_word), r.position12,
+                             r.calibrated_alpha_rad, r.velocity_rad_s, r.flags);
+                } else if (CASTER_NODE_ID == 6) {
+                    ESP_LOGI(TAG, "seq=%" PRIu64 " wheel_count=%" PRId64 " wheel_rad=%.6f wheel_vel=%.6f flags=0x%04" PRIx32,
+                             batch[count - 1].sequence, r.wheel.raw_count, r.wheel.angle_rad, r.wheel.velocity_rad_s, r.wheel.flags);
+                } else if (CASTER_NODE_ID == 4) {
+                    ESP_LOGI(TAG, "seq=%" PRIu64 " swivel_pos=%d swivel_rad=%.6f swivel_vel=%.6f swivel_flags=0x%04" PRIx32
+                             " wheel_count=%" PRId64 " wheel_rad=%.6f wheel_vel=%.6f wheel_flags=0x%04" PRIx32,
+                             batch[count - 1].sequence, r.position12, r.calibrated_alpha_rad, r.velocity_rad_s, r.flags,
+                             r.wheel.raw_count, r.wheel.angle_rad, r.wheel.velocity_rad_s, r.wheel.flags);
+                } else if (CASTER_NODE_ID == 3) {
                     ESP_LOGI(TAG, "seq=%" PRIu64 " spi=0x%04x pos=%d absolute_rad=%.6f"
                              " alpha_rad=%.6f alpha_deg=%.3f unwrapped_angle_rad=%.6f"
                              " velocity_rad_s=%.6f flags=0x%04" PRIx32,
@@ -144,8 +168,22 @@ extern "C" void app_main() {
     ESP_LOGI(TAG, "firmware=%s IDF=%s wheel=%s role=%s node=%d reset_reason=%d",
              caster::kFirmwareVersion, esp_get_idf_version(), caster::kWheel, caster::kRole, CASTER_NODE_ID, reset_reason);
     ESP_LOGI(TAG, "GPIO: %s; onboard RF GPIO3=0 GPIO14=0",
-             CASTER_NODE_ID == 3 ? "CS=21 SCLK=19 MISO=20 MOSI=18" : "A=0 B=1 Z=2");
-    if (CASTER_NODE_ID != 3)
+              CASTER_NODE_ID == 5 ? "swivel: CS=21 SCLK=19 MISO=20 MOSI=18" :
+              CASTER_NODE_ID == 6 ? "wheel: A=0 B=1; no Z" :
+              CASTER_NODE_ID == 4 ? "swivel: CS=21 SCLK=19 MISO=20 MOSI=18; wheel: A=0 B=1; no Z" :
+              CASTER_NODE_ID == 3 ? "CS=21 SCLK=19 MISO=20 MOSI=18" : "A=0 B=1 Z=2");
+    if (CASTER_NODE_ID == 5)
+        ESP_LOGI(TAG, "SWIVEL 12bit sign=%d zero_rad=%.6f phase_verified=%s max_rpm=%.3f rate_verified=%s",
+                 config.sign, config.alpha_zero_rad, config.phase_reference_valid ? "yes" : "NO",
+                 config.max_rpm, config.max_rpm_verified ? "yes" : "NO");
+    else if (CASTER_NODE_ID == 6)
+        ESP_LOGI(TAG, "WHEEL CPR=%d verified=%s sign=%d window_us=%" PRId64,
+                 config.wheel_cpr, config.wheel_cpr_verified ? "yes" : "NO", config.wheel_sign, config.wheel_velocity_window_us);
+    else if (CASTER_NODE_ID == 4)
+        ESP_LOGI(TAG, "ORDINARY swivel=12bit sign=%d zero_rad=%.6f; wheel CPR=%d verified=%s sign=%d window_us=%" PRId64,
+                 config.sign, config.alpha_zero_rad, config.wheel_cpr, config.wheel_cpr_verified ? "yes" : "NO",
+                 config.wheel_sign, config.wheel_velocity_window_us);
+    else if (CASTER_NODE_ID != 3)
         ESP_LOGI(TAG, "PPR=%d x4=%d verified=%s sign=%d", config.ppr, config.ppr * 4,
                  config.ppr_verified ? "yes" : "NO", config.sign);
     else
@@ -160,8 +198,9 @@ extern "C" void app_main() {
     caster::transport_init();
     // Generate the session identifier with the RF entropy source active.
     snprintf(boot_id, sizeof(boot_id), "%08" PRIx32 "%08" PRIx32, esp_random(), esp_random());
-    ESP_LOGI(TAG, "wheel=%s role=%s device_id=%s boot_id=%s UDP receiver=%s:%d sample=%dHz transmit=%dHz clock_sync=INVALID",
-             caster::kWheel, caster::kRole, caster::transport_device_id(), boot_id, RECEIVER_IPV4, UDP_PORT, SAMPLE_HZ, TRANSMIT_HZ);
+    ESP_LOGI(TAG, "wheel=%s role=%s device_id=%s boot_id=%s UDP receiver=%s:%d sample=%dHz transmission_task=%dHz sample_datagrams_target=%dHz clock_sync=INVALID",
+             caster::kWheel, caster::kRole, caster::transport_device_id(), boot_id, RECEIVER_IPV4, UDP_PORT,
+             SAMPLE_HZ, TRANSMIT_HZ, CASTER_NODE_ID >= 4 ? SAMPLE_HZ : TRANSMIT_HZ);
     caster::encoder_init(config);
     caster::recorder_init(boot_id, reset_reason, &diagnostics);
     samples_queue = xQueueCreate(64, sizeof(caster::Sample));

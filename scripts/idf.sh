@@ -8,16 +8,22 @@ container_image="espressif/idf:v${sdk_version}@sha256:4317595a911886e04cbc6d7313
 
 usage() {
     cat <<'EOF'
-Usage: ./scripts/idf.sh front_left|front_right H1|H2|CENTER [idf.py arguments]
+Usage: ./scripts/idf.sh front_left|front_right H1|H2|CENTER|ORDINARY|SWIVEL|WHEEL [idf.py arguments]
 
   ./scripts/idf.sh front_left H1 build
   ./scripts/idf.sh front_left H1 -p /dev/ttyACM0 flash monitor
   ./scripts/idf.sh front_right CENTER size
+  bash ordinary_caster/idf.sh front_left SWIVEL build
+  bash ordinary_caster/idf.sh front_right WHEEL -p /dev/ttyACM0 flash monitor
   python3 scripts/flash_windows.py front_left CENTER --port COM6
 
 Uses ESP-IDF v5.4.2 from your activated environment, a local installation at
 ~/esp/esp-idf-v5.4.2 (override with CASTER_IDF_PATH), or its Docker image.
-Copy config/<wheel>.example.h to config/<wheel>.local.h and edit before building.
+Ball: copy ball_caster/config/<wheel>.example.h to its .local.h.
+Existing root config/<wheel>.local.h is supported if the family-local header
+does not exist. Two private headers for the same ball wheel are rejected.
+Ordinary: copy ordinary_caster/config/<wheel>.example.h to its .local.h.
+Edit network settings and measured calibration before building.
 Disconnect the battery/UBEC before connecting USB.
 EOF
 }
@@ -35,9 +41,24 @@ esac
 role=${1:-}
 if [[ $# -gt 0 ]]; then shift; fi
 case "$role" in
-    H1|H2|CENTER) ;;
-    *) printf 'Unknown role: %s (use H1, H2, or CENTER).\n' "$role" >&2; exit 2 ;;
+    H1|H2|CENTER|ORDINARY|SWIVEL|WHEEL) ;;
+    *) printf 'Unknown role: %s (use H1, H2, CENTER, SWIVEL, WHEEL, or legacy ORDINARY).\n' "$role" >&2; exit 2 ;;
 esac
+if [[ "$role" == ORDINARY || "$role" == SWIVEL || "$role" == WHEEL ]]; then
+    config_dir=ordinary_caster/config
+    build_dir="build/ordinary_caster/$wheel"
+    if [[ "$role" != ORDINARY ]]; then build_dir="$build_dir/$role"; fi
+else
+    if [[ -f "$repo_dir/ball_caster/config/$wheel.local.h" && -f "$repo_dir/config/$wheel.local.h" ]]; then
+        printf 'Ambiguous ball calibration: both ball_caster/config/%s.local.h and config/%s.local.h exist. Keep one authoritative private header.\n' "$wheel" "$wheel" >&2
+        exit 2
+    elif [[ -f "$repo_dir/config/$wheel.local.h" ]]; then
+        config_dir=config
+    else
+        config_dir=ball_caster/config
+    fi
+    build_dir="build/$wheel/$role"
+fi
 if [[ $# -eq 0 ]]; then
     set -- build
 fi
@@ -84,12 +105,12 @@ for argument in "$@"; do
             exit 2 ;;
     esac
 done
-if [[ ! -f "$repo_dir/config/$wheel.local.h" ]]; then
-    printf 'First copy config/%s.example.h to config/%s.local.h and edit your settings.\n' "$wheel" "$wheel" >&2
+if [[ ! -f "$repo_dir/$config_dir/$wheel.local.h" ]]; then
+    printf 'First copy %s/%s.example.h to %s/%s.local.h and edit your settings.\n' "$config_dir" "$wheel" "$config_dir" "$wheel" >&2
     exit 2
 fi
 
-mkdir -p "$repo_dir/build/$wheel/$role"
+mkdir -p "$repo_dir/$build_dir"
 cd "$repo_dir"
 native_sdk=${CASTER_IDF_PATH:-$HOME/esp/esp-idf-v${sdk_version}}
 active_sdk_version=""
@@ -101,8 +122,8 @@ if [[ "$active_sdk_version" != "ESP-IDF v${sdk_version}" && -f "$native_sdk/expo
     . "$native_sdk/export.sh" >/dev/null
 fi
 if command -v idf.py >/dev/null 2>&1 && [[ $(idf.py --version 2>/dev/null) == "ESP-IDF v${sdk_version}" ]]; then
-    idf.py -B "build/$wheel/$role" \
-        "-DSDKCONFIG=$repo_dir/build/$wheel/$role/sdkconfig" \
+    idf.py -B "$build_dir" \
+        "-DSDKCONFIG=$repo_dir/$build_dir/sdkconfig" \
         "-DCASTER_WHEEL=$wheel" "-DCASTER_ROLE=$role" -DIDF_TARGET=esp32c6 "$@"
     print_flash_hint "$@"
     exit 0
@@ -144,6 +165,6 @@ if [[ -n "$port" ]]; then
     docker_args+=(--device "$port:$port" --group-add "$(stat -c %g "$port")")
 fi
 docker "${docker_args[@]}" "$container_image" \
-    idf.py -B "build/$wheel/$role" "-DSDKCONFIG=/project/build/$wheel/$role/sdkconfig" \
+    idf.py -B "$build_dir" "-DSDKCONFIG=/project/$build_dir/sdkconfig" \
     "-DCASTER_WHEEL=$wheel" "-DCASTER_ROLE=$role" -DIDF_TARGET=esp32c6 "$@"
 print_flash_hint "$@"

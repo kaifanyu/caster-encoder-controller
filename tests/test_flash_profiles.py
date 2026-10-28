@@ -22,9 +22,12 @@ class FlashProfileTests(unittest.TestCase):
                     patch.object(flash_windows, "linux_path", side_effect=Path), \
                     patch.object(flash_windows.subprocess, "run") as run:
                 for wheel in ("front_left", "front_right"):
-                    for role in ("H1", "H2", "CENTER"):
-                        build = repo / "build" / wheel / role
-                        build.mkdir(parents=True)
+                    for role in ("H1", "H2", "CENTER", "ORDINARY", "SWIVEL", "WHEEL"):
+                        build = (repo / "build" / "ordinary_caster" / wheel if role == "ORDINARY"
+                                 else repo / "build" / wheel / role)
+                        if role in ("SWIVEL", "WHEEL"):
+                            build = repo / "build/ordinary_caster" / wheel / role
+                        build.mkdir(parents=True, exist_ok=True)
                         cache = build / "CMakeCache.txt"
                         cache.write_text(f"CASTER_WHEEL:STRING={wheel}\nCASTER_ROLE:STRING={role}\n")
                         binary = build / "application.bin"
@@ -47,9 +50,16 @@ class FlashProfileTests(unittest.TestCase):
                                          [str(repo / "scripts/idf.sh"), wheel, role, "build"])
                         self.assertIn(str(binary), run.call_args_list[1].args[0])
                         run.reset_mock()
-                        cache.write_text("CASTER_WHEEL:STRING=wrong\nCASTER_ROLE:STRING=H1\n")
+                        # Even a matching wheel must not flash another family's image.
+                        wrong_role = "CENTER" if role == "ORDINARY" else "ORDINARY"
+                        cache.write_text(f"CASTER_WHEEL:STRING={wheel}\nCASTER_ROLE:STRING={wrong_role}\n")
                         with self.assertRaisesRegex(ValueError, "profile does not match"):
                             flash_windows.main([*args, "--skip-build"])
+                        run.assert_not_called()
+                        other_wheel = "front_right" if wheel == "front_left" else "front_left"
+                        cache.write_text(f"CASTER_WHEEL:STRING={other_wheel}\nCASTER_ROLE:STRING={role}\n")
+                        with self.assertRaisesRegex(ValueError, "profile does not match"):
+                            flash_windows.main([*args, "--dry-run"])
                         run.assert_not_called()
 
 

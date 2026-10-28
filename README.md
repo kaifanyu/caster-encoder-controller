@@ -1,5 +1,22 @@
 # HAMR caster encoders
 
+Two hardware families have separate acquisition/configuration folders:
+
+- [Ball casters](ball_caster/README.md): the existing H1/H2/CENTER boards and
+  legacy commands below remain supported, with unchanged v2 recordings.
+- [Ordinary casters](ordinary_caster/README.md): **four ESP32-C6 boards total**,
+  one `SWIVEL` and one `WHEEL` on each of front-left and front-right. Each reads
+  only its own sensor. In the ESP-IDF PowerShell terminal, build with
+  `./ordinary_caster/idf.ps1 front_left SWIVEL` (select each wheel/role), or use
+  `bash ordinary_caster/idf.sh front_left SWIVEL build` on Linux/WSL.
+  See the [v4/storage contract](ordinary_caster/PROTOCOL.md).
+
+Shared `main/` contains scheduling, Wi-Fi, serialization and the guarded local
+recorder. Family-specific drivers are in `ball_caster/` and `ordinary_caster/`.
+Ordinary live logs can be captured with `python3 -m ordinary_caster.logger
+--wheel front_left --duration 60` (from this repository root); the matching Pi
+workflow supports local recording, download, analysis and orientation replay.
+
 One ESP-IDF project runs on six **Seeed XIAO ESP32-C6** boards: H1, H2, and CENTER on each of the **front-left** and **front-right** wheels. Each board reads its own encoder and calculates angle and angular velocity. The Pi can command local flash recording over Wi-Fi and download the verified history after stopping. Live UDP telemetry and the standalone Python logger remain available outside local recording.
 
 | Firmware role | Hardware | Measurement |

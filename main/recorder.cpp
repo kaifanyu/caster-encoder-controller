@@ -79,6 +79,11 @@ cJSON* identity() {
     cJSON_AddStringToObject(object, "wheel_id", kWheel);
     cJSON_AddStringToObject(object, "device_id", transport_device_id());
     cJSON_AddNumberToObject(object, "node_id", CASTER_NODE_ID);
+#if CASTER_NODE_ID >= 4
+    cJSON_AddStringToObject(object, "caster_type", "ordinary");
+    cJSON_AddNumberToObject(object, "record_version", kVersion);
+    cJSON_AddNumberToObject(object, "record_bytes", kRecordBytes);
+#endif
     cJSON_AddStringToObject(object, "boot_id", current_boot);
     return object;
 }
@@ -188,7 +193,7 @@ void recover() {
     }
     if (erased(header, kHeaderBytes)) { free(header); return; }
     const size_t length = get(header + 16, 4);
-    const bool valid = std::memcmp(header, "CASTLOG1", 8) == 0 &&
+    const bool valid = std::memcmp(header, kMagic, 8) == 0 &&
         get(header + 8, 4) == kVersion && get(header + 12, 4) == kRecordBytes &&
         length > 0 && length < kHeaderBytes - 24 &&
         get(header + 20, 4) == crc32(header + 24, length);
@@ -275,14 +280,17 @@ bool prepare(const char* requested, bool discard_existing = false) {
     }
     cJSON_AddStringToObject(metadata, "run_id", requested);
     cJSON_AddItemToObject(metadata, "packet", packet);
-    cJSON_AddStringToObject(metadata, "center_unwrap_segment", "starts_at_recording; no continuity across runs");
+    cJSON_AddStringToObject(metadata, CASTER_NODE_ID == 6 ? "wheel_velocity_segment" :
+                           CASTER_NODE_ID >= 4 ? "swivel_unwrap_segment" : "center_unwrap_segment",
+                           CASTER_NODE_ID == 6 ? "velocity baseline resets at recording; wheel count remains cumulative for this boot" :
+                           "starts_at_recording; no continuity across runs");
     char* text = finish_json(metadata);
     const size_t length = text ? std::strlen(text) : kHeaderBytes;
     auto* header = static_cast<uint8_t*>(calloc(1, kHeaderBytes));
     if (!header || length >= kHeaderBytes - 24) {
         free(text); free(header); state = State::error; std::strcpy(reason, "metadata_too_large"); return false;
     }
-    std::memcpy(header, "CASTLOG1", 8);
+    std::memcpy(header, kMagic, 8);
     put(header + 8, kVersion, 4); put(header + 12, kRecordBytes, 4);
     put(header + 16, length, 4); put(header + 20, crc32(text, length), 4);
     std::memcpy(header + 24, text, length);
@@ -633,7 +641,13 @@ void recorder_capture(const Sample& sample) {
     // reset its segment, rather than claiming the old CENTER integration is new.
     const bool segment_ready = !new_segment.load();
     const int64_t timestamp = sample.reading.timestamp_us;
-    if (segment_ready && timestamp >= start_us && (!stopping || timestamp <= stop_us)) {
+    const bool channel_times_in_window = timestamp >= start_us && (!stopping || timestamp <= stop_us)
+#if CASTER_NODE_ID >= 4
+        && (CASTER_NODE_ID == 5 || sample.reading.wheel.timestamp_us >= start_us)
+        && (CASTER_NODE_ID == 5 || !stopping || sample.reading.wheel.timestamp_us <= stop_us)
+#endif
+        ;
+    if (segment_ready && channel_times_in_window) {
         uint8_t record[kRecordBytes];
         encode_record(sample, record);
         if (accepted >= capacity) request_stop("capacity", timestamp, true);

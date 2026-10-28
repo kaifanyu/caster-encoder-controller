@@ -3,6 +3,8 @@ sdkconfig
 sdkconfig.old
 config/local.h
 config/*.local.h
+ordinary_caster/config/*.local.h
+ball_caster/config/*.local.h
 recordings/
 __pycache__/
 *.pyc

@@ -19,6 +19,12 @@ struct EncoderConfig {
     double alpha_zero_rad;
     bool phase_reference_valid;
     double velocity_filter_tau_s;
+    // ORDINARY role: the existing coordinate settings above describe swivel.
+    int wheel_cpr = 128;
+    bool wheel_cpr_verified = false;
+    int wheel_sign = 1;
+    int64_t wheel_zero_count = 0;
+    int64_t wheel_velocity_window_us = 50000;
 };
 
 enum StatusFlags : uint32_t {
@@ -35,15 +41,27 @@ enum StatusFlags : uint32_t {
     RATE_BOUND_VERIFIED = 1u << 10,
     ACQUISITION_OVERRUN = 1u << 11,
     SPI_IO_ERROR = 1u << 12,
+    FORMAT_ERROR = 1u << 13,
 };
 
 constexpr double missing_value = std::numeric_limits<double>::quiet_NaN();
+
+struct WheelReading {
+    int64_t timestamp_us = 0;
+    int64_t raw_count = 0;
+    double angle_rad = missing_value;
+    double velocity_rad_s = missing_value;
+    double filtered_velocity_rad_s = missing_value;
+    uint32_t flags = 0;
+};
 
 struct Reading {
     int64_t timestamp_us = 0;
     int64_t raw_count = 0;
     uint16_t raw_spi_word = 0;
     int position14 = -1;
+    int position12 = -1;
+    WheelReading wheel{};
     double angle_rad = missing_value;
     double absolute_angle_rad = missing_value;
     double calibrated_alpha_rad = missing_value;

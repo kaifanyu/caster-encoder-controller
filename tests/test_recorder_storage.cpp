@@ -52,6 +52,11 @@ Sample sample(uint64_t sequence, int64_t timestamp) {
     value.reading.angle_rad = 1.25;
     value.reading.velocity_rad_s = -2.5;
     value.reading.index_raw_count = INT64_MIN;
+    value.reading.wheel.timestamp_us = timestamp;
+    value.reading.wheel.raw_count = INT64_MIN;
+    value.reading.wheel.angle_rad = 3.25;
+    value.reading.wheel.velocity_rad_s = -4.5;
+    value.reading.wheel.flags = READY | SAMPLE_VALID | UNWRAP_CONTINUOUS;
     return value;
 }
 httpd_req_t api(const char* path, const std::string& body) {
@@ -79,9 +84,16 @@ void format_test() {
     encode_record(value, bytes);
     assert(get(bytes, 8) == UINT64_MAX);
     assert(get(bytes + 8, 8) == INT64_MAX);
+#if CASTER_NODE_ID >= 4
+    assert(static_cast<int64_t>(get(bytes + 16, 8)) == value.reading.wheel.timestamp_us);
+    assert(static_cast<int64_t>(get(bytes + 24, 8)) == INT64_MIN);
+    assert(get(bytes + 34, 2) == 65535);
+    assert(get(bytes + 88, 8) == 0x400a000000000000ULL);
+#else
     assert(static_cast<int64_t>(get(bytes + 16, 8)) == value.reading.raw_count);
     assert(get(bytes + 26, 2) == 65535);
     assert(get(bytes + 32, 8) == 0x3ff4000000000000ULL);
+#endif
     assert(valid_record(bytes));
     bytes[20] ^= 1;
     assert(!valid_record(bytes));
@@ -109,12 +121,24 @@ void lifecycle_test() {
     assert(accepted == 0);
     assert(recorder_new_segment());
     recorder_capture(sample(2, began - 1));
+#if CASTER_NODE_ID == 4 || CASTER_NODE_ID == 6
+    auto crossing_start = sample(2, began + 1);
+    crossing_start.reading.wheel.timestamp_us = began - 1;
+    recorder_capture(crossing_start);
+    assert(accepted == 0);
+#endif
     recorder_capture(sample(3, began + 5000));
     assert(accepted == 1 && count == 0);
     // Stop must include a pre-boundary acquisition finishing after the command.
     request_stop("requested", began + 10000, false);
     writer_pass();
     assert(stopping && state == State::recording); // waiting for capture barrier
+#if CASTER_NODE_ID == 4 || CASTER_NODE_ID == 6
+    auto crossing_stop = sample(4, began + 9000);
+    crossing_stop.reading.wheel.timestamp_us = began + 10001;
+    recorder_capture(crossing_stop);
+    assert(accepted == 1);
+#endif
     recorder_capture(sample(4, began + 9000));
     recorder_capture(sample(5, began + 10001));
     while (stopping) writer_pass();
@@ -130,8 +154,8 @@ void lifecycle_test() {
     assert(download(&log) == ESP_OK);
     assert(log.response.size() == kHeaderBytes + 2 * kRecordBytes);
     const auto* bytes = reinterpret_cast<const uint8_t*>(log.response.data());
-    assert(std::memcmp(bytes, "CASTLOG1", 8) == 0 && get(bytes + 12, 4) == 100);
-    assert(crc32(bytes + kHeaderBytes, 200) == rolling_crc);
+    assert(std::memcmp(bytes, kMagic, 8) == 0 && get(bytes + 12, 4) == kRecordBytes);
+    assert(crc32(bytes + kHeaderBytes, 2 * kRecordBytes) == rolling_crc);
     const uint32_t saved_crc = rolling_crc;
     boot(false, "fedcba9876543210");
     assert(count == 2 && rolling_crc == saved_crc && state == State::stopped && diagnostics_known);
@@ -152,9 +176,9 @@ void interrupted_test() {
     recorder_capture(sample(3, start_us + 3));
     // Power fails after two full records plus part of the third. Emulate the
     // write, but don't run the failure/finalize code before reboot.
-    uint8_t bytes[300];
-    for (size_t i = 0; i < 3; ++i) assert(xQueueReceive(write_queue, bytes + i * 100, 0));
-    mock_write_budget = 245;
+    uint8_t bytes[3 * kRecordBytes];
+    for (size_t i = 0; i < 3; ++i) assert(xQueueReceive(write_queue, bytes + i * kRecordBytes, 0));
+    mock_write_budget = 2 * kRecordBytes + 45;
     assert(esp_partition_write(partition, kHeaderBytes, bytes, sizeof(bytes)) != ESP_OK);
     boot();
     assert(count == 2 && state == State::stopped && !diagnostics_known && !acknowledged);
@@ -212,7 +236,7 @@ void api_stop_test() {
     assert(response.status == "200 OK" && state == State::stopped && count == 1);
     cJSON* status = cJSON_Parse(response.response.c_str());
     assert(cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(status, "finalizing")));
-    assert(cJSON_GetObjectItemCaseSensitive(status, "data_bytes")->valuedouble == 4196);
+    assert(cJSON_GetObjectItemCaseSensitive(status, "data_bytes")->valuedouble == kHeaderBytes + kRecordBytes);
     cJSON_Delete(status);
     httpd_req_t sync;
     assert(get_sync(&sync) == ESP_OK);
