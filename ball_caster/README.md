@@ -37,3 +37,27 @@ the [root setup guide](../README.md), [wiring handoff](../HAMR_Caster_ESP32_Code
 and [bench checklist](../docs/bench-checklist.md) for electrical and calibration
 requirements. Disconnect battery/UBEC before computer USB and keep the mechanism
 stationary at power-on. These measurement boards do not command motors.
+
+## CENTER SPI diagnostics
+
+CENTER startup dumps the routing for GPIO18 (MOSI), GPIO19 (SCLK), GPIO20
+(MISO), and GPIO21 (manual CS), then prints three `CENTER SPI probe=` lines.
+Each probe uses the normal two-byte position read and reports both received
+bytes, the CS/transfer API results, and parity. Probes run before the sampling
+timer starts; they do not enter sample counters, recordings, or angle tracking.
+
+If position stays `-1`, retain these startup lines as well as the sample logs:
+
+- `rx=00,00` with all API results `ESP_OK` means the SPI peripheral returned
+  zero bytes; it does not establish whether the encoder responded. Verify the
+  MISO input route and compare the same diagnostic firmware on the working
+  assembly. Correct software routing alone does not verify signals at the
+  encoder connector.
+- A non-OK CS or byte result identifies an API failure. A byte marked `skipped`
+  was not transferred. Such reads remain invalid and are not decoded as zero.
+- `parity=valid` means the received frame passed the encoder check bits. A
+  valid zero position is `rx=c0,00`; `rx=00,00` is invalid.
+
+`CENTER_MAX_RPM_VERIFIED` controls velocity/unwrap calculations after valid
+position reads. It cannot repair raw SPI reception. Wi-Fi and UDP port settings
+are independent of these reads.

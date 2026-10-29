@@ -8,6 +8,7 @@
 #include "driver/spi_master.h"
 #include "esp_attr.h"
 #include "esp_check.h"
+#include "esp_err.h"
 #include "esp_idf_version.h"
 #include "esp_intr_alloc.h"
 #include "esp_log.h"
@@ -180,21 +181,23 @@ void init_absolute() {
     ESP_ERROR_CHECK(spi_bus_add_device(SPI2_HOST, &device, &spi));
     last_cs_high_us = esp_timer_get_time();
     ESP_LOGI(kTag, "CENTER SPI: mode=0 clock=500000Hz; manual CS GPIO21 configured as GPIO");
-    ESP_ERROR_CHECK(gpio_dump_io_configuration(stdout, 1ULL << kCs));
+    ESP_ERROR_CHECK(gpio_dump_io_configuration(stdout,
+        (1ULL << kCs) | (1ULL << 19) | (1ULL << 20) | (1ULL << 18)));
 }
 
-bool read_absolute_word(uint16_t& word, int64_t& timestamp) {
+bool read_absolute_word(uint16_t& word, int64_t& timestamp, unsigned startup_probe = 0) {
     const int64_t remaining_us = 40 - (esp_timer_get_time() - last_cs_high_us);
     if (remaining_us > 0) esp_rom_delay_us(static_cast<uint32_t>(remaining_us));
     ESP_ERROR_CHECK(spi_device_acquire_bus(spi, portMAX_DELAY));
-    gpio_set_level(kCs, 0);
+    const esp_err_t cs_low_result = gpio_set_level(kCs, 0);
     timestamp = esp_timer_get_time();  // Local acquisition time, before first clock.
     esp_rom_delay_us(3);
     spi_transaction_t high{};
     high.flags = SPI_TRANS_USE_TXDATA | SPI_TRANS_USE_RXDATA;
     high.length = 8;
     high.tx_data[0] = 0x00;
-    const esp_err_t high_result = spi_device_polling_transmit(spi, &high);
+    const esp_err_t high_result = cs_low_result == ESP_OK
+        ? spi_device_polling_transmit(spi, &high) : cs_low_result;
     esp_rom_delay_us(3);
     spi_transaction_t low{};
     low.flags = SPI_TRANS_USE_TXDATA | SPI_TRANS_USE_RXDATA;
@@ -203,11 +206,24 @@ bool read_absolute_word(uint16_t& word, int64_t& timestamp) {
     const esp_err_t low_result = high_result == ESP_OK
         ? spi_device_polling_transmit(spi, &low) : high_result;
     esp_rom_delay_us(3);
-    gpio_set_level(kCs, 1);
+    const esp_err_t cs_high_result = gpio_set_level(kCs, 1);
     last_cs_high_us = esp_timer_get_time();
     spi_device_release_bus(spi);
     word = static_cast<uint16_t>((high.rx_data[0] << 8) | low.rx_data[0]);
-    return high_result == ESP_OK && low_result == ESP_OK;
+    const bool io_ok = cs_low_result == ESP_OK && high_result == ESP_OK &&
+                       low_result == ESP_OK && cs_high_result == ESP_OK;
+    // Boot-only probes use the production transaction, with logging after CS
+    // release. No printing is added to the periodic acquisition path.
+    if (startup_probe) {
+        ESP_LOGI(kTag, "CENTER SPI probe=%u tx=00,00 rx=%02x,%02x cs_low=%s byte1=%s byte2=%s cs_high=%s parity=%s",
+                 startup_probe, static_cast<unsigned>(high.rx_data[0]),
+                 static_cast<unsigned>(low.rx_data[0]), esp_err_to_name(cs_low_result),
+                 cs_low_result == ESP_OK ? esp_err_to_name(high_result) : "skipped",
+                 high_result == ESP_OK ? esp_err_to_name(low_result) : "skipped",
+                 esp_err_to_name(cs_high_result),
+                 io_ok ? (math::amt25_parity_valid(word) ? "valid" : "invalid") : "not_checked");
+    }
+    return io_ok;
 }
 }  // namespace
 
@@ -221,8 +237,16 @@ void encoder_init(const EncoderConfig& settings) {
         ESP_LOGE(kTag, "Invalid encoder configuration");
         ESP_ERROR_CHECK(ESP_ERR_INVALID_ARG);
     }
-    if (config.role == 3) init_absolute();
-    else init_quadrature();
+    if (config.role == 3) {
+        init_absolute();
+        // Diagnose raw reception before the sample timer starts. These reads
+        // do not seed the angle tracker or enter telemetry/recording counters.
+        for (unsigned probe = 1; probe <= 3; ++probe) {
+            uint16_t word = 0;
+            int64_t timestamp = 0;
+            read_absolute_word(word, timestamp, probe);
+        }
+    } else init_quadrature();
 }
 
 void encoder_begin_recording_segment() {
