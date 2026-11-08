@@ -92,40 +92,98 @@ struct WheelVelocity {
     int64_t interval_us = 0;
 };
 
-// A fresh trailing-window average at every acquisition, not a last-good value
-// held across samples. The 128-CPR ring is too coarse for a useful 5-ms finite
-// difference at low speed. This fixed-size history supports 1 s at 1000 Hz.
-// It uses exact count subtraction before converting large totals to doubles.
+// Average between observed count changes, rather than arbitrary window ends.
+// At low speed this measures the period between counts; at high speed it
+// averages changes over the requested window. These are sample timestamps,
+// not hardware edge timestamps. A multi-count snapshot is one observation.
+// Between changes, the no-new-count age caps the estimate; timeout means zero.
+// Position, count continuity, and hardware acquisition remain independent.
 class WheelVelocityEstimator {
 public:
-    void reset() { head_ = size_ = 0; }
+    void reset() {
+        head_ = size_ = 0;
+        initialized_ = false;
+        direction_ = 0;
+    }
 
     WheelVelocity update(int64_t count, int64_t timestamp_us, int cpr, int sign,
-                         int64_t window_us) {
+                         int64_t window_us, int64_t stop_timeout_us = 250000) {
         WheelVelocity result;
         if (timestamp_us < 0 || cpr <= 0 || (sign != 1 && sign != -1) ||
-            window_us < minimum_velocity_window_us || window_us > maximum_velocity_window_us) {
+            window_us < minimum_velocity_window_us || window_us > maximum_velocity_window_us ||
+            stop_timeout_us < window_us || stop_timeout_us > maximum_velocity_window_us) {
             reset();
             return result;
         }
-        if (size_ != 0) {
-            const int64_t gap = timestamp_us - at(size_ - 1).timestamp;
-            // An interval longer than the requested window cannot describe a
-            // fresh window. Start a new baseline rather than bridge that gap.
-            if (gap <= 0 || gap > window_us) reset();
+        if (initialized_) {
+            const int64_t gap = timestamp_us - previous_sample_time_;
+            // A quiet count is different from missing acquisition samples.
+            if (gap <= 0 || gap > window_us || cpr != cpr_ || sign != sign_ ||
+                window_us != window_us_ || stop_timeout_us != stop_timeout_us_) reset();
         }
-        const int64_t target = timestamp_us - window_us;
-        while (size_ >= 2 && at(1).timestamp <= target) {
-            head_ = (head_ + 1) % history_.size();
-            --size_;
+        if (!initialized_) {
+            initialized_ = true;
+            previous_sample_time_ = stationary_start_ = timestamp_us;
+            previous_count_ = count;
+            cpr_ = cpr;
+            sign_ = sign;
+            window_us_ = window_us;
+            stop_timeout_us_ = stop_timeout_us;
+            return result;
         }
-        if (size_ == history_.size()) reset();
-        history_[(head_ + size_) % history_.size()] = {timestamp_us, count};
-        ++size_;
-        if (size_ < 2 || at(0).timestamp > target) return result;
-        result.interval_us = timestamp_us - at(0).timestamp;
-        result.radians_per_second = math::count_difference(count, at(0).count) *
-            sign * math::tau / cpr / (result.interval_us / 1e6);
+
+        const double delta = math::count_difference(count, previous_count_);
+        previous_sample_time_ = timestamp_us;
+        previous_count_ = count;
+        if (delta != 0) {
+            const int direction = delta > 0 ? 1 : -1;
+            if (size_ != 0 && (direction != direction_ ||
+                timestamp_us - at(size_ - 1).timestamp > stop_timeout_us)) {
+                head_ = size_ = 0;
+            }
+            direction_ = direction;
+            // Keep the event just before the trailing-window boundary. Sparse
+            // motion can legitimately have an inter-event interval > window.
+            const int64_t target = timestamp_us - window_us;
+            while (size_ >= 2 && at(1).timestamp <= target) {
+                head_ = (head_ + 1) % history_.size();
+                --size_;
+            }
+            // 1024 entries cover the supported 1-s window at 1000 Hz.
+            if (size_ == history_.size()) head_ = size_ = 0;
+            history_[(head_ + size_) % history_.size()] = {timestamp_us, count};
+            ++size_;
+        }
+
+        if (size_ == 0) {
+            if (timestamp_us - stationary_start_ < window_us) return result;
+            result.interval_us = window_us;
+            result.radians_per_second = 0;
+            result.valid = true;
+            return result;
+        }
+        const auto& latest = at(size_ - 1);
+        const int64_t age_us = timestamp_us - latest.timestamp;
+        if (age_us >= stop_timeout_us) {
+            head_ = size_ = 0;
+            direction_ = 0;
+            result.interval_us = stop_timeout_us;
+            result.radians_per_second = 0;
+            result.valid = true;
+            return result;
+        }
+        // The first observed change alone cannot establish a count period.
+        // This also prevents averaging through a stop or direction reversal.
+        if (size_ < 2) return result;
+        result.interval_us = latest.timestamp - at(0).timestamp;
+        double counts_per_second = math::count_difference(latest.count, at(0).count) /
+                                   (result.interval_us / 1e6);
+        if (age_us > 0) {
+            const double age_limit = 1e6 / age_us;
+            if (std::abs(counts_per_second) > age_limit)
+                counts_per_second = direction_ * age_limit;
+        }
+        result.radians_per_second = counts_per_second * sign * math::tau / cpr;
         result.valid = true;
         return result;
     }
@@ -136,6 +194,15 @@ private:
     std::array<Observation, 1024> history_{};
     size_t head_ = 0;
     size_t size_ = 0;
+    bool initialized_ = false;
+    int direction_ = 0;
+    int cpr_ = 0;
+    int sign_ = 0;
+    int64_t previous_sample_time_ = 0;
+    int64_t stationary_start_ = 0;
+    int64_t previous_count_ = 0;
+    int64_t window_us_ = 0;
+    int64_t stop_timeout_us_ = 0;
 };
 
 }  // namespace caster::ordinary

@@ -53,6 +53,9 @@ class OrdinarySerializationTests(unittest.TestCase):
                 if "wheel" in active:
                     self.assertEqual(metadata["wheel"]["counts_per_rev"], 128)
                     self.assertFalse(metadata["wheel"]["cpr_verified"])
+                    self.assertEqual(metadata["wheel"]["velocity_estimator"], "count_period_v1")
+                    self.assertEqual(metadata["wheel"]["velocity_window_us"], 50000)
+                    self.assertEqual(metadata["wheel"]["velocity_stop_timeout_us"], 250000)
                 data = log.read_bytes()
                 self.assertEqual(data[:8], b"CASTLOG2")
                 version, size, length, crc = struct.unpack_from("<4I", data, 8)

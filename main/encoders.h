@@ -25,6 +25,7 @@ struct EncoderConfig {
     int wheel_sign = 1;
     int64_t wheel_zero_count = 0;
     int64_t wheel_velocity_window_us = 50000;
+    int64_t wheel_velocity_stop_timeout_us = 250000;
 };
 
 enum StatusFlags : uint32_t {

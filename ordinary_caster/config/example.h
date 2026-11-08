@@ -65,9 +65,14 @@
 #ifndef WHEEL_ZERO_COUNT
 #define WHEEL_ZERO_COUNT 0LL
 #endif
-// Windowed rate avoids a one-count / 5 ms derivative at this coarse resolution.
+// Average observed count-change periods over this target window.
 #ifndef WHEEL_VELOCITY_WINDOW_US
 #define WHEEL_VELOCITY_WINDOW_US 50000LL
+#endif
+// No count change for this long means zero; longer improves very slow motion
+// estimates but delays stop detection. Must be >= window, and <= 1 second.
+#ifndef WHEEL_VELOCITY_STOP_TIMEOUT_US
+#define WHEEL_VELOCITY_STOP_TIMEOUT_US 250000LL
 #endif
 #ifndef PCNT_GLITCH_FILTER_NS
 #define PCNT_GLITCH_FILTER_NS 0

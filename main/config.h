@@ -31,6 +31,9 @@ static_assert(WHEEL_VELOCITY_WINDOW_US >= 1000 && WHEEL_VELOCITY_WINDOW_US <= 10
               "Wheel velocity window must be between 1 ms and 1 s");
 static_assert(WHEEL_VELOCITY_WINDOW_US >= 1000000 / SAMPLE_HZ,
               "Wheel velocity window must be at least one acquisition interval");
+static_assert(WHEEL_VELOCITY_STOP_TIMEOUT_US >= WHEEL_VELOCITY_WINDOW_US &&
+              WHEEL_VELOCITY_STOP_TIMEOUT_US <= 1000000,
+              "Wheel velocity stop timeout must be between its window and 1 s");
 #else
 #ifdef ORDINARY_CASTER_CONFIG
 #error "Ball profiles must not use an ordinary-caster configuration"
@@ -44,7 +47,7 @@ static_assert(UDP_PORT > 0 && UDP_PORT <= 65535, "Invalid UDP port");
 
 namespace caster {
 #if CASTER_NODE_ID >= 4
-constexpr const char* kFirmwareVersion = "0.5.0";
+constexpr const char* kFirmwareVersion = "0.5.1";
 constexpr const char* kCasterType = "ordinary";
 constexpr const char* kLocalIpv4 = CASTER_NODE_ID == 5 ? SWIVEL_IPV4 :
                                   CASTER_NODE_ID == 6 ? WHEEL_IPV4 : ORDINARY_IPV4;
@@ -74,6 +77,7 @@ inline EncoderConfig configuration() {
     c.wheel_sign = WHEEL_SIGN;
     c.wheel_zero_count = WHEEL_ZERO_COUNT;
     c.wheel_velocity_window_us = WHEEL_VELOCITY_WINDOW_US;
+    c.wheel_velocity_stop_timeout_us = WHEEL_VELOCITY_STOP_TIMEOUT_US;
 #else
     c.ppr = c.role == 1 ? H1_PPR : H2_PPR;
     c.ppr_verified = c.role == 1 ? H1_PPR_VERIFIED : H2_PPR_VERIFIED;

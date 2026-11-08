@@ -198,6 +198,8 @@ void encoder_init(const EncoderConfig& settings) {
         (config.wheel_sign != 1 && config.wheel_sign != -1) || config.wheel_cpr <= 0 ||
         config.wheel_velocity_window_us < ordinary::minimum_velocity_window_us ||
         config.wheel_velocity_window_us > ordinary::maximum_velocity_window_us ||
+        config.wheel_velocity_stop_timeout_us < config.wheel_velocity_window_us ||
+        config.wheel_velocity_stop_timeout_us > ordinary::maximum_velocity_window_us ||
         config.glitch_filter_ns < 0 || !std::isfinite(config.max_rpm) || config.max_rpm <= 0 ||
         !std::isfinite(config.alpha_zero_rad) || !std::isfinite(config.velocity_filter_tau_s) ||
         config.velocity_filter_tau_s < 0) {
@@ -234,7 +236,8 @@ Reading encoder_read() {
         wheel.angle_rad = ordinary::wheel_angle(wheel.raw_count, config.wheel_zero_count,
                                                config.wheel_cpr, config.wheel_sign);
         const auto velocity = wheel_velocity.update(wheel.raw_count, wheel.timestamp_us,
-            config.wheel_cpr, config.wheel_sign, config.wheel_velocity_window_us);
+            config.wheel_cpr, config.wheel_sign, config.wheel_velocity_window_us,
+            config.wheel_velocity_stop_timeout_us);
         if (velocity.valid) {
             wheel.velocity_rad_s = velocity.radians_per_second;
             const double dt_s = previous_wheel_velocity_time > 0

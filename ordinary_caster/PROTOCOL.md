@@ -47,9 +47,32 @@ boot-only live receiver cannot join different segment origins.
 
 Wheel angle is startup-relative signed count minus its configured count offset,
 scaled by measured counts per revolution. Counting continues across recording
-segments. Default CPR=128 is unverified. Default wheel velocity is a freshly
-computed trailing 50 ms count-window average, not an instantaneous 5 ms estimate.
-Its filter/window lag must be retained in experimental interpretation.
+segments. Default CPR=128 is unverified. Wheel velocity follows the estimator
+described by wheel metadata. Through firmware 0.5.0 it was a
+trailing 50 ms count-window average. Firmware 0.5.1 identifies the estimator as
+`velocity_estimator: "count_period_v1"` and includes
+`velocity_stop_timeout_us` (default 250000), alongside `velocity_window_us`
+(default 50000). Older metadata without the new fields remains readable.
+
+`count_period_v1` divides count change by elapsed time between actual
+count-change observations in the same direction. It anchors the averaging
+window at the latest change and uses the oldest retained change at or before
+that window's start, or the available shorter history of at least two changes.
+Sparse changes may span longer than the window. Multiple counts observed in one
+snapshot remain one observation; no individual edge times are invented.
+Timestamps have acquisition-spacing uncertainty (nominally 5 ms at 200 Hz).
+
+Moving velocity is unavailable until two changes are observed; a stationary
+startup reports zero after one window. Between changes, magnitude is capped
+at one count divided by elapsed time since the latest change. At the stop
+timeout, velocity becomes zero and motion history is discarded. This is an
+estimate during a quiet interval, not a new measured edge or proof of a stop.
+With 128 CPR and 250 ms, continuous estimates cannot be sustained below about
+0.196 rad/s. Reversal discards the old direction's history, and invalid
+snapshots, nonincreasing timestamps, acquisition gaps longer than the averaging
+window, or recording resets require a fresh velocity baseline. Count continuity
+and position resolution are unaffected. Preserve this estimator's timing and
+any additional filtering when interpreting experiments.
 
 ## Channel validity flags
 

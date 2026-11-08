@@ -122,6 +122,14 @@ def validate_metadata(packet):
             if config.get("software_zero_count") is None:
                 raise ValueError("wheel.software_zero_count must be an int64 string")
             integer(config.get("velocity_window_us"), "wheel.velocity_window_us", 1, INT64_MAX)
+            # Older firmware omitted these fields and used a trailing count
+            # window. Preserve those recordings while checking the new pair.
+            if "velocity_estimator" in config or "velocity_stop_timeout_us" in config:
+                if config.get("velocity_estimator") != "count_period_v1":
+                    raise ValueError("unsupported wheel.velocity_estimator")
+                window_us = integer(config["velocity_window_us"], "wheel.velocity_window_us", 1000, 1000000)
+                integer(config.get("velocity_stop_timeout_us"), "wheel.velocity_stop_timeout_us",
+                        window_us, 1000000)
             integer(config.get("glitch_filter_ns"), "wheel.glitch_filter_ns", 0, (1 << 31) - 1)
             for name in ("index_available", "invalid_transition_detection"):
                 boolean(config.get(name), f"wheel.{name}")

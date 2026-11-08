@@ -159,9 +159,31 @@ recover missed turns across an ambiguous interval or power cycle.
 
 Measure several complete wheel turns in both directions before setting
 `WHEEL_CPR_VERIFIED`. `WHEEL_ZERO_COUNT` is a relative offset and cannot create
-absolute wheel phase at boot. `WHEEL_VELOCITY_WINDOW_US` defaults to 50 ms;
-instantaneous 5 ms count differences are coarse at 128 CPR. Preserve this
-window in experiment metadata and use comparable analysis bandwidths.
+absolute wheel phase at boot. Firmware 0.5.1 uses `count_period_v1` for both
+wheel boards: velocity comes from the count difference and elapsed time between
+observed count changes. `WHEEL_VELOCITY_WINDOW_US` defaults to 50 ms and selects
+the span of recent changes to average; at low speed, the two available changes
+can span longer than that window. This avoids the previous fixed-window steps
+of about 0.98 rad/s at 128 CPR. At high speed, when every acquisition changes
+the count, it approaches a count-window average.
+
+The first count change after startup, stopping, or reversal cannot establish a
+period: velocity is unavailable until another change in the same direction.
+A stationary startup reports zero after one window. When no new count arrives,
+the estimate's magnitude is limited to one count divided by the time since the
+latest change. `WHEEL_VELOCITY_STOP_TIMEOUT_US` defaults to 250 ms; after that
+quiet interval the estimate becomes zero and discards its motion history.
+It must be at least the averaging window and at most one second. Invalid
+snapshots, nonincreasing timestamps, acquisition gaps longer than the averaging
+window, and new recording segments also discard the velocity history.
+
+These are sampled count-change times, with nominal 5 ms acquisition spacing,
+not hardware edge timestamps. Physical position resolution remains 128 CPR;
+the estimator cannot reconstruct motion within a count. With the default
+250 ms timeout, speeds below about 0.196 rad/s can produce gaps in the estimate.
+A longer timeout accommodates slower motion but delays stop detection. Preserve
+the estimator name, window, timeout, and optional velocity filter in metadata
+when comparing recordings. The default filter time constant remains zero.
 
 Each board acquires its own channel at 200 Hz by default. Samples include the
 sensor's timestamp, validity, angle and velocity. The split schema is version 4,

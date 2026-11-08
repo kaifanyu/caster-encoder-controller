@@ -175,7 +175,9 @@ char* serialize_metadata(const char* boot_id, const char* device_id, const Encod
     cJSON_AddBoolToObject(wheel, "cpr_verified", c.wheel_cpr_verified);
     number(wheel, "coordinate_sign", c.wheel_sign);
     count_string(wheel, "software_zero_count", c.wheel_zero_count);
+    cJSON_AddStringToObject(wheel, "velocity_estimator", "count_period_v1");
     number(wheel, "velocity_window_us", c.wheel_velocity_window_us);
+    number(wheel, "velocity_stop_timeout_us", c.wheel_velocity_stop_timeout_us);
     number(wheel, "velocity_filter_tau_s", c.velocity_filter_tau_s);
     number(wheel, "glitch_filter_ns", c.glitch_filter_ns);
     cJSON_AddBoolToObject(wheel, "phase_reference_valid", false);

@@ -13,7 +13,7 @@ int main(int argc, char** argv) {
     config.sign = config.wheel_sign = 1;
     config.max_rpm = 600;
     config.max_rpm_verified = argc == 2;
-    config.wheel_cpr_verified = true;
+    config.wheel_cpr_verified = role != 6; // unverified scale must remain explicit
     encoder_init(config);
     assert(mock_pcnt_init_count == (role == 6));
     assert(mock_spi_init_count == (role == 5));
@@ -59,4 +59,47 @@ int main(int argc, char** argv) {
     mock_time += 5000;
     const auto r = encoder_read();
     assert(role == 5 ? bool(r.flags & SAMPLE_VALID) : r.wheel.raw_count == 11);
+    if (role == 6) {
+        assert(!(r.wheel.flags & VELOCITY_VALID));
+        // Exercise the real driver's flags/filter plumbing at one count every
+        // 100 ms: the old 50-ms window oscillated between zero and 0.982 rad/s.
+        const double slow_speed = 2 * std::acos(-1.0) / 128 / .1;
+        for (int i = 1; i <= 60; ++i) {
+            mock_time += 5000;
+            mock_count = 11 + i / 20;
+            const auto sample = encoder_read();
+            assert(sample.wheel.raw_count == mock_count && (sample.wheel.flags & SAMPLE_VALID));
+            assert(!(sample.wheel.flags & PPR_VERIFIED));
+            assert(mock_spi_reads == 0 && sample.flags == 0);
+            if (i >= 20 && i < 40) {
+                assert(!(sample.wheel.flags & VELOCITY_VALID));
+                assert(std::isnan(sample.wheel.velocity_rad_s));
+                assert(std::isnan(sample.wheel.filtered_velocity_rad_s));
+            } else if (i >= 40) {
+                assert(sample.wheel.flags & VELOCITY_VALID);
+                assert(std::abs(sample.wheel.velocity_rad_s - slow_speed) < 1e-10);
+                assert(sample.wheel.filtered_velocity_rad_s == sample.wheel.velocity_rad_s);
+            }
+        }
+        for (int i = 1; i <= 50; ++i) {
+            mock_time += 5000;
+            const auto sample = encoder_read();
+            assert(sample.wheel.flags & VELOCITY_VALID);
+            assert(sample.wheel.velocity_rad_s >= 0 && sample.wheel.velocity_rad_s <= slow_speed);
+            if (i == 50) assert(sample.wheel.velocity_rad_s == 0);
+        }
+        // An isolated first reverse change must clear both raw and filtered
+        // velocity validity; a second change establishes the new direction.
+        mock_time += 5000;
+        --mock_count;
+        const auto first = encoder_read();
+        assert(!(first.wheel.flags & VELOCITY_VALID));
+        assert(std::isnan(first.wheel.velocity_rad_s));
+        assert(std::isnan(first.wheel.filtered_velocity_rad_s));
+        mock_time += 5000;
+        --mock_count;
+        const auto second = encoder_read();
+        assert((second.wheel.flags & VELOCITY_VALID) && second.wheel.velocity_rad_s < 0);
+        assert(second.wheel.filtered_velocity_rad_s == second.wheel.velocity_rad_s);
+    }
 }

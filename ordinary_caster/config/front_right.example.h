@@ -20,5 +20,6 @@
 #define WHEEL_SIGN 1
 #define WHEEL_ZERO_COUNT 0LL
 #define WHEEL_VELOCITY_WINDOW_US 50000LL
+#define WHEEL_VELOCITY_STOP_TIMEOUT_US 250000LL
 // Override shared rates/filters above this include. Never override CASTER_* IDs.
 #include "example.h"

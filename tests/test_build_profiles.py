@@ -197,6 +197,12 @@ class ProfileTests(unittest.TestCase):
                                                 capture_output=True, text=True)
                 self.assertNotEqual(invalid_window.returncode, 0)
                 self.assertIn("at least one acquisition interval", invalid_window.stderr)
+                for timeout in (49999, 1000001):
+                    invalid_timeout = subprocess.run(
+                        [*command, f"-DWHEEL_VELOCITY_STOP_TIMEOUT_US={timeout}"],
+                        capture_output=True, text=True)
+                    self.assertNotEqual(invalid_timeout.returncode, 0)
+                    self.assertIn("stop timeout must be between", invalid_timeout.stderr)
             (root / "example.h").write_text((REPO / "config/example.h").read_text())
             rejected = subprocess.run(command, capture_output=True, text=True)
             self.assertNotEqual(rejected.returncode, 0)

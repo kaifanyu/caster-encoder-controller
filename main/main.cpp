@@ -177,12 +177,15 @@ extern "C" void app_main() {
                  config.sign, config.alpha_zero_rad, config.phase_reference_valid ? "yes" : "NO",
                  config.max_rpm, config.max_rpm_verified ? "yes" : "NO");
     else if (CASTER_NODE_ID == 6)
-        ESP_LOGI(TAG, "WHEEL CPR=%d verified=%s sign=%d window_us=%" PRId64,
-                 config.wheel_cpr, config.wheel_cpr_verified ? "yes" : "NO", config.wheel_sign, config.wheel_velocity_window_us);
+        ESP_LOGI(TAG, "WHEEL CPR=%d verified=%s sign=%d window_us=%" PRId64
+                 " estimator=count_period_v1 stop_timeout_us=%" PRId64,
+                 config.wheel_cpr, config.wheel_cpr_verified ? "yes" : "NO", config.wheel_sign,
+                 config.wheel_velocity_window_us, config.wheel_velocity_stop_timeout_us);
     else if (CASTER_NODE_ID == 4)
-        ESP_LOGI(TAG, "ORDINARY swivel=12bit sign=%d zero_rad=%.6f; wheel CPR=%d verified=%s sign=%d window_us=%" PRId64,
+        ESP_LOGI(TAG, "ORDINARY swivel=12bit sign=%d zero_rad=%.6f; wheel CPR=%d verified=%s sign=%d window_us=%" PRId64
+                 " estimator=count_period_v1 stop_timeout_us=%" PRId64,
                  config.sign, config.alpha_zero_rad, config.wheel_cpr, config.wheel_cpr_verified ? "yes" : "NO",
-                 config.wheel_sign, config.wheel_velocity_window_us);
+                 config.wheel_sign, config.wheel_velocity_window_us, config.wheel_velocity_stop_timeout_us);
     else if (CASTER_NODE_ID != 3)
         ESP_LOGI(TAG, "PPR=%d x4=%d verified=%s sign=%d", config.ppr, config.ppr * 4,
                  config.ppr_verified ? "yes" : "NO", config.sign);

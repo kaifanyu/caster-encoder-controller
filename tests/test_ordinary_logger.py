@@ -113,6 +113,28 @@ class OrdinaryProtocolTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     protocol.decode_packet(encoded(wrong))
 
+    def test_count_period_metadata_and_legacy_compatibility(self):
+        legacy = metadata()
+        self.assertEqual(protocol.decode_packet(encoded(legacy)), legacy)
+        current = metadata()
+        current["firmware_version"] = "0.5.1"
+        current["wheel"].update(velocity_estimator="count_period_v1", velocity_stop_timeout_us=250000)
+        self.assertEqual(protocol.decode_packet(encoded(current)), current)
+        for field, value in (("velocity_estimator", "unknown"), ("velocity_estimator", None),
+                             ("velocity_window_us", 999), ("velocity_window_us", 1000001),
+                             ("velocity_stop_timeout_us", None), ("velocity_stop_timeout_us", True),
+                             ("velocity_stop_timeout_us", 99999), ("velocity_stop_timeout_us", 1000001)):
+            with self.subTest(field=field, value=value):
+                wrong = copy.deepcopy(current)
+                wrong["wheel"][field] = value
+                with self.assertRaises(ValueError):
+                    protocol.decode_packet(encoded(wrong))
+        for field in ("velocity_estimator", "velocity_stop_timeout_us"):
+            wrong = copy.deepcopy(current)
+            del wrong["wheel"][field]
+            with self.assertRaises(ValueError):
+                protocol.decode_packet(encoded(wrong))
+
     def test_rejects_malformed_samples_and_json(self):
         cases = (("swivel", "position12", 4096), ("swivel", "position12", True),
                  ("swivel", "flags", 1 << 14), ("swivel", "raw_spi_word", None),
